@@ -1,0 +1,11 @@
+ktor:
+  application:
+    modules:
+      - jp.simplespace.ApplicationKt.module
+  deployment:
+    port: 8080
+
+db:
+  url: ${DB_URL}
+  user: ${DB_USER}
+  password: ${DB_PASSWORD}
