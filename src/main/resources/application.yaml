@@ -9,3 +9,7 @@ db:
   url: ${DB_URL}
   user: ${DB_USER}
   password: ${DB_PASSWORD}
+
+discord:
+  token: ${DISCORD_TOKEN}
+  owner_id: ${DISCORD_OWNER_ID}

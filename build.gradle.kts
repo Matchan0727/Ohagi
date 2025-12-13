@@ -17,6 +17,11 @@ application {
     mainClass = "io.ktor.server.netty.EngineMain"
 }
 
+repositories {
+    mavenCentral()
+    maven { url = uri("https://m2.chew.pro/releases") }
+}
+
 dependencies {
     implementation("io.ktor:ktor-server-core")
     implementation("io.ktor:ktor-server-thymeleaf")
@@ -32,8 +37,14 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:$logback_version")
     implementation("io.ktor:ktor-server-config-yaml")
     implementation("net.dv8tion:JDA:$jda_version")
+    implementation("pw.chew:jda-chewtils:2.2.1")
     implementation("club.minnced:jda-ktx:$jda_ktx_version")
     implementation("io.ktor:ktor-serialization-gson:3.3.2")
+    implementation("org.openjdk.nashorn:nashorn-core:15.7")
+    // Google系
+    implementation("com.google.api-client:google-api-client:2.0.0")
+    implementation("com.google.oauth-client:google-oauth-client-jetty:1.34.1")
+    implementation("com.google.apis:google-api-services-calendar:v3-rev20220715-2.0.0")
     testImplementation("io.ktor:ktor-server-test-host")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:$kotlin_version")
 }
