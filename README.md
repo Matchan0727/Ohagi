@@ -19,7 +19,7 @@ Here's a list of features included in this project:
 | [Thymeleaf](https://start.ktor.io/p/thymeleaf)                         | Serves HTML content, templated using Thymeleaf                                     |
 | [Content Negotiation](https://start.ktor.io/p/content-negotiation)     | Provides automatic content conversion according to Content-Type and Accept headers |
 | [kotlinx.serialization](https://start.ktor.io/p/kotlinx-serialization) | Handles JSON serialization using kotlinx.serialization library                     |
-| [Exposed](https://start.ktor.io/p/exposed)                             | Adds Exposed database to your application                                          |
+| [Exposed](https://start.ktor.io/p/exposed)                             | Adds Exposed db to your application                                          |
 
 ## Building & Running
 

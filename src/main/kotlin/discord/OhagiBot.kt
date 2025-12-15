@@ -13,6 +13,7 @@ import dev.minn.jda.ktx.jdabuilder.default
 import dev.minn.jda.ktx.jdabuilder.intents
 import io.ktor.server.application.*
 import io.ktor.server.config.ApplicationConfig
+import jp.simplespace.DriveReserveNotifier
 import jp.simplespace.discord.commands.HelpCommand
 import jp.simplespace.discord.listeners.ActionListener
 import net.dv8tion.jda.api.JDA
@@ -37,6 +38,8 @@ object OhagiBot {
     val eventWaiter: EventWaiter = EventWaiter()
     val logger: Logger = LoggerFactory.getLogger(OhagiBot::class.java)
 
+    val driveReserveNotifier = DriveReserveNotifier()
+
     private var isInitialized = false
 
     fun initialize(config: ApplicationConfig) {
@@ -56,12 +59,9 @@ object OhagiBot {
         }
 
         jda.listener<ReadyEvent> {
-            if (CalendarController.getCalendar() == null) {
-                logger.warn("カレンダーが設定されていません。カレンダー機能は利用できません。")
-            }
-            else {
-                logger.info("カレンダーは正常に設定されています。")
-            }
+            driveReserveNotifier.start()
+
+            logger.info("正常に動作しています。")
         }
 
         isInitialized = true

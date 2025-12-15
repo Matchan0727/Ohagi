@@ -7,20 +7,25 @@ import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import io.ktor.server.thymeleaf.Thymeleaf
-import io.ktor.server.thymeleaf.ThymeleafContent
+import jp.simplespace.db.CalendarService
+import jp.simplespace.db.DriveService
+import jp.simplespace.db.ExposedUser
+import jp.simplespace.db.UserService
 import org.jetbrains.exposed.sql.*
-import org.thymeleaf.templateresolver.ClassLoaderTemplateResolver
+
+lateinit var database: Database
 
 fun Application.configureDatabases() {
     val config = environment.config.config("db")
-    val database = Database.connect(
+    database = Database.connect(
         driver = "com.mysql.cj.jdbc.Driver",
         url = config.property("url").getString(),
         user = config.property("user").getString(),
         password = config.property("password").getString(),
     )
     val userService = UserService(database)
+    CalendarService(database)
+    DriveService(database)
     install(ContentNegotiation) {
         json()
     }

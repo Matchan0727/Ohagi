@@ -1,6 +1,8 @@
 package calendar
 
 import com.google.api.client.util.DateTime
+import jp.simplespace.database
+import jp.simplespace.db.CalendarService
 import jp.simplespace.discord.OhagiBot
 import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.components.actionrow.ActionRow
@@ -21,18 +23,7 @@ import java.util.concurrent.TimeUnit
 object CalendarInfoGenerator {
     val jda: JDA = OhagiBot.jda
     val calendar = CalendarController.getCalendar()
-    private val calendarIdMap = mapOf(
-        "390393475784245248" to "e07acc8d856b576196ff1fa6e81e5cc2a6a61756c0fcdcee5a1779587c8d5a1c@group.calendar.google.com",  // Matchan
-        "586157827400400907" to "a6cc56f883278d0a02d4d48e47a57303bc69ae1ddecd84d807bb611daf90080b@group.calendar.google.com", // ねこかわいい
-        "608788412367110149" to "cbbbef8bc8cf45bc3b781f8d9d2ea28df0e90ddca3df4e2eaf132a600ea09092@group.calendar.google.com", // 黒猫
-        "881563425707282463" to "61d9506ea1e8908aec2774c6c0269b88e1ad86f09986b5f416d11748c7157087@group.calendar.google.com", // ユミィ
-//        "508919483440693294" to "huinkvlh9ffh7h20s7ks0i9vc4fq7ouf@import.calendar.google.com", // 葵さん
-    )
     val zoneId = ZoneId.of("Asia/Tokyo")
-
-    fun getCalendarIdByUserId(userId: String): String? {
-        return calendarIdMap[userId]
-    }
 
     fun generateContainer(maxSize: Int = 10, timeMin: Long? = System.currentTimeMillis(), timeMax: Long? = null): Container {
         val list = generateSortedScheduleList(maxSize, timeMin, timeMax)
@@ -93,13 +84,12 @@ object CalendarInfoGenerator {
             ActionRow.of(
                 actionRows
             ),
-            Separator.createDivider(Separator.Spacing.SMALL),
-            TextDisplay.of("-# 新しいカレンダーの追加は受け付けてﾅｲ!")
         )
     }
 
     fun generateSortedScheduleList(maxSize: Int, timeMin: Long? = System.currentTimeMillis(), timeMax: Long? = null): List<Schedule> {
         val schedules = mutableListOf<Schedule>()
+        val calendarIdMap = CalendarService(database).getIdMapping()
         top@ for ((userId, calendarId) in calendarIdMap) {
             val list = calendar.events().list(calendarId)
                 .setMaxResults(10)
