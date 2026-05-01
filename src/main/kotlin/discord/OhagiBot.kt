@@ -15,6 +15,7 @@ import jp.simplespace.discord.commands.HelpCommand
 import jp.simplespace.discord.listeners.ActionListener
 import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.OnlineStatus
+import net.dv8tion.jda.api.entities.Activity
 import net.dv8tion.jda.api.events.session.ReadyEvent
 import net.dv8tion.jda.api.requests.GatewayIntent
 import net.dv8tion.jda.api.utils.MemberCachePolicy
@@ -67,6 +68,7 @@ object OhagiBot {
             .setOwnerId(discordConfig.property("owner_id").getString())
             .useHelpBuilder(false)
             .setStatus(OnlineStatus.ONLINE)
+            .setActivity(Activity.customStatus("おはぎくんです。"))
             .addSlashCommands(
                 HelpCommand(),
                 ModCommand(config),
