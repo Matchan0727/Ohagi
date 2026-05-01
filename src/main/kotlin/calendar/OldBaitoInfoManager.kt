@@ -22,7 +22,7 @@ class OldBaitoInfoManager {
             .setOrderBy("startTime")
             .setSingleEvents(true)
             .execute()
-        val items = events.items
+        val items = events.items.filter {it.summary == "アルバイト"}
         if (items.isNotEmpty()) {
             val start = OffsetDateTime.parse(items[0].start.dateTime.toStringRfc3339(), DateTimeFormatter.ISO_OFFSET_DATE_TIME)
             val end = OffsetDateTime.parse(items[0].end.dateTime.toStringRfc3339(), DateTimeFormatter.ISO_OFFSET_DATE_TIME)
