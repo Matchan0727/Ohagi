@@ -39,3 +39,4 @@ out/
 
 # Credentials
 credentials.json
+/tokens/StoredCredential
