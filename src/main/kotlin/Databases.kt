@@ -8,7 +8,6 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import jp.simplespace.db.CalendarService
-import jp.simplespace.db.DriveService
 import jp.simplespace.db.ExposedUser
 import jp.simplespace.db.UserService
 import org.jetbrains.exposed.sql.*
@@ -25,7 +24,6 @@ fun Application.configureDatabases() {
     )
     val userService = UserService(database)
     CalendarService(database)
-    DriveService(database)
     install(ContentNegotiation) {
         json()
     }
