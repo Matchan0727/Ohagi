@@ -18,22 +18,25 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.nio.file.StandardOpenOption
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 
 class CalendarController {
     companion object {
-        const val APPLICATION_NAME = "Chuken"
+        const val APPLICATION_NAME = "Ohagi"
         val JSON_FACTORY = GsonFactory.getDefaultInstance()
         const val TOKENS_DIRECTORY_PATH = "tokens"
         val SCOPES = listOf(CalendarScopes.CALENDAR_READONLY)
-        const val CREDENTIALS_FILE_PATH = "/credentials.json"
+        const val CREDENTIALS_FILE_PATH = "credentials.json"
         val HTTP_TRANSPORT = GoogleNetHttpTransport.newTrustedTransport()
 
         const val VERIFY_SERVER_PORT = 31809
 
         fun getCalendar(): Calendar {
-            val `in` = CalendarController::class.java.getResourceAsStream(CREDENTIALS_FILE_PATH)!!
+            val `in` = Files.newInputStream(Paths.get(CREDENTIALS_FILE_PATH), StandardOpenOption.READ)!!
             val clientSecrets = GoogleClientSecrets.load(JSON_FACTORY, InputStreamReader(`in`))
             val flow = GoogleAuthorizationCodeFlow.Builder(
                 HTTP_TRANSPORT, JSON_FACTORY, clientSecrets, SCOPES)

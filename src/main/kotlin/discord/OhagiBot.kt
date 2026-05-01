@@ -1,8 +1,6 @@
 package jp.simplespace.discord
 
 import bot.command.slash.mod.ModCommand
-import calendar.CalendarController
-import calendar.CalendarInfoGenerator
 import com.jagrosh.jdautilities.command.CommandClient
 import com.jagrosh.jdautilities.command.CommandClientBuilder
 import com.jagrosh.jdautilities.commons.waiter.EventWaiter
@@ -13,7 +11,6 @@ import dev.minn.jda.ktx.jdabuilder.default
 import dev.minn.jda.ktx.jdabuilder.intents
 import io.ktor.server.application.*
 import io.ktor.server.config.ApplicationConfig
-import jp.simplespace.DriveReserveNotifier
 import jp.simplespace.discord.commands.HelpCommand
 import jp.simplespace.discord.listeners.ActionListener
 import net.dv8tion.jda.api.JDA
@@ -38,8 +35,6 @@ object OhagiBot {
     val eventWaiter: EventWaiter = EventWaiter()
     val logger: Logger = LoggerFactory.getLogger(OhagiBot::class.java)
 
-    val driveReserveNotifier = DriveReserveNotifier()
-
     private var isInitialized = false
 
     fun initialize(config: ApplicationConfig) {
@@ -59,7 +54,7 @@ object OhagiBot {
         }
 
         jda.listener<ReadyEvent> {
-            driveReserveNotifier.start()
+//            driveReserveNotifier.start()
 
             logger.info("正常に動作しています。")
         }
