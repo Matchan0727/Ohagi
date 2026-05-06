@@ -16,7 +16,7 @@ class OldBaitoInfoManager {
         val nowDate = OffsetDateTime.parse(nowTime.toStringRfc3339(), DateTimeFormatter.ISO_OFFSET_DATE_TIME)
 //            val nowDate = OffsetDateTime.parse("2024-11-21T17:00:00.000+09:00", DateTimeFormatter.ISO_OFFSET_DATE_TIME)
         val events = calendar.events().list("e07acc8d856b576196ff1fa6e81e5cc2a6a61756c0fcdcee5a1779587c8d5a1c@group.calendar.google.com")
-            .setMaxResults(10)
+            .setMaxResults(20)
 //                .setTimeMin(DateTime(nowDate.toEpochSecond() * 1000))
             .setTimeMin(nowTime)
             .setOrderBy("startTime")
