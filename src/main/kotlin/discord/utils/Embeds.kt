@@ -3,15 +3,12 @@ package jp.simplespace.discord.utils
 import com.jagrosh.jdautilities.command.SlashCommand
 import jp.simplespace.discord.OhagiBot
 import net.dv8tion.jda.api.EmbedBuilder
-import net.dv8tion.jda.api.JDA
-import net.dv8tion.jda.api.entities.*
+import net.dv8tion.jda.api.entities.MessageEmbed
+import net.dv8tion.jda.api.entities.User
 import net.dv8tion.jda.api.interactions.IntegrationType
 import net.dv8tion.jda.api.interactions.InteractionContextType
 import net.dv8tion.jda.api.interactions.commands.Command
-import net.dv8tion.jda.api.utils.TimeFormat
 import java.awt.Color
-import java.lang.Exception
-import java.util.*
 
 object Embeds {
     fun getHelps(retCommands: List<Command>, slashCommands: List<SlashCommand>,

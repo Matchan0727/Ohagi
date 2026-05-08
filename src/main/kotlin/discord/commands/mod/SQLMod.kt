@@ -3,7 +3,7 @@ package bot.command.slash.mod
 import com.jagrosh.jdautilities.command.SlashCommand
 import com.jagrosh.jdautilities.command.SlashCommandEvent
 import com.mysql.cj.jdbc.MysqlDataSource
-import io.ktor.server.config.ApplicationConfig
+import io.ktor.server.config.*
 import jp.simplespace.discord.utils.Embeds
 import jp.simplespace.discord.utils.ResultSetToJsonMapper
 import net.dv8tion.jda.api.EmbedBuilder

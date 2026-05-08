@@ -1,6 +1,5 @@
 package jp.simplespace
 
-import calendar.CalendarInfoGenerator
 import io.ktor.server.application.*
 import jp.simplespace.discord.configureDiscord
 

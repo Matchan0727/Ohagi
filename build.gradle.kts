@@ -1,12 +1,11 @@
 val exposed_version: String by project
-val kotlin_version: String by project
 val logback_version: String by project
 val jda_version: String by project
 val jda_ktx_version: String by project
 
 plugins {
     kotlin("jvm") version "2.2.21"
-    id("io.ktor.plugin") version "3.3.2"
+    id("io.ktor.plugin") version "3.4.3"
     id("org.jetbrains.kotlin.plugin.serialization") version "2.2.21"
 }
 
@@ -31,6 +30,7 @@ dependencies {
     implementation("io.ktor:ktor-client-cio")
     implementation("org.jsoup:jsoup:1.21.2")
     implementation("org.jetbrains.exposed:exposed-core:$exposed_version")
+    implementation("org.jetbrains.exposed:exposed-dao:$exposed_version")
     implementation("org.jetbrains.exposed:exposed-jdbc:$exposed_version")
     implementation("com.mysql:mysql-connector-j:9.5.0")
     implementation("io.ktor:ktor-server-netty")
@@ -46,5 +46,5 @@ dependencies {
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.34.1")
     implementation("com.google.apis:google-api-services-calendar:v3-rev20220715-2.0.0")
     testImplementation("io.ktor:ktor-server-test-host")
-    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:$kotlin_version")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.2.21")
 }

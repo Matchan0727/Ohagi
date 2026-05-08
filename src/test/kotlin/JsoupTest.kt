@@ -2,7 +2,6 @@ package jp.simplespace
 
 import org.jsoup.Connection
 import org.jsoup.Jsoup
-import org.junit.Test
 
 class JsoupTest {
 

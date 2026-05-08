@@ -2,27 +2,18 @@ package calendar
 
 import com.google.api.client.extensions.java6.auth.oauth2.AuthorizationCodeInstalledApp
 import com.google.api.client.extensions.jetty.auth.oauth2.LocalServerReceiver
-import com.google.api.client.googleapis.GoogleUtils
 import com.google.api.client.googleapis.auth.oauth2.GoogleAuthorizationCodeFlow
 import com.google.api.client.googleapis.auth.oauth2.GoogleClientSecrets
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport
-import com.google.api.client.googleapis.mtls.MtlsProvider
-import com.google.api.client.googleapis.mtls.MtlsUtils
-import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.json.gson.GsonFactory
 import com.google.api.client.util.store.FileDataStoreFactory
 import com.google.api.services.calendar.Calendar
 import com.google.api.services.calendar.CalendarScopes
 import java.io.File
-import java.io.IOException
 import java.io.InputStreamReader
-import java.net.InetSocketAddress
-import java.net.Proxy
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
-import java.security.GeneralSecurityException
-import java.security.KeyStore
 
 class CalendarController {
     companion object {

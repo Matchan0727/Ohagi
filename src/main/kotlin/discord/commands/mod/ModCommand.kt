@@ -2,7 +2,7 @@ package bot.command.slash.mod
 
 import com.jagrosh.jdautilities.command.SlashCommand
 import com.jagrosh.jdautilities.command.SlashCommandEvent
-import io.ktor.server.config.ApplicationConfig
+import io.ktor.server.config.*
 
 class ModCommand(config: ApplicationConfig) : SlashCommand() {
     init {

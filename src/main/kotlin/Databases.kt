@@ -10,7 +10,7 @@ import io.ktor.server.routing.*
 import jp.simplespace.db.CalendarService
 import jp.simplespace.db.ExposedUser
 import jp.simplespace.db.UserService
-import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.v1.jdbc.Database
 
 lateinit var database: Database
 

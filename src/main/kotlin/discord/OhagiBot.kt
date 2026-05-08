@@ -10,7 +10,7 @@ import dev.minn.jda.ktx.events.listener
 import dev.minn.jda.ktx.jdabuilder.default
 import dev.minn.jda.ktx.jdabuilder.intents
 import io.ktor.server.application.*
-import io.ktor.server.config.ApplicationConfig
+import io.ktor.server.config.*
 import jp.simplespace.discord.commands.HelpCommand
 import jp.simplespace.discord.listeners.ActionListener
 import net.dv8tion.jda.api.JDA
