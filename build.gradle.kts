@@ -4,9 +4,9 @@ val jda_version: String by project
 val jda_ktx_version: String by project
 
 plugins {
-    kotlin("jvm") version "2.2.21"
+    kotlin("jvm") version "2.3.21"
     id("io.ktor.plugin") version "3.4.3"
-    id("org.jetbrains.kotlin.plugin.serialization") version "2.2.21"
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.3.21"
 }
 
 group = "jp.simplespace"
@@ -31,7 +31,7 @@ dependencies {
     implementation("io.ktor:ktor-client-cio")
     implementation("io.ktor:ktor-server-netty")
     implementation("io.ktor:ktor-server-config-yaml")
-    implementation("io.ktor:ktor-serialization-gson:3.3.2")
+    implementation("io.ktor:ktor-serialization-gson")
     // DB系
     implementation("org.jetbrains.exposed:exposed-core:$exposed_version")
     implementation("org.jetbrains.exposed:exposed-dao:$exposed_version")
@@ -54,7 +54,7 @@ dependencies {
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.34.1")
     implementation("com.google.apis:google-api-services-calendar:v3-rev20220715-2.0.0")
     testImplementation("io.ktor:ktor-server-test-host")
-    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.2.21")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.3.21")
     // その他
     implementation("org.openjdk.nashorn:nashorn-core:15.7")
     implementation("ch.qos.logback:logback-classic:${logback_version}")
