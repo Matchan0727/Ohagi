@@ -35,7 +35,8 @@ class JoinCommand : SlashCommand() {
         }
 
         val authorVoiceState = event.member!!.voiceState
-        if(authorVoiceState==null || !authorVoiceState.inAudioChannel()) {
+        val vc = event.optGuildChannel("vc")
+        if(authorVoiceState==null || (!authorVoiceState.inAudioChannel() && vc == null)) {
             event.replyComponents(
                 simpleTitleAndDescriptionContainer("ボイスチャンネルに未参加",
                     "ボイスチャンネルに参加してからこのコマンドを使用してください。",
@@ -44,10 +45,13 @@ class JoinCommand : SlashCommand() {
                 .queue()
             return
         }
-        authorVoiceState.channel?.let { OhagiAudioManager.setupGuildAudio(event.guild!!, it.id) }
+        val ch = vc ?: authorVoiceState.channel!!
+        authorVoiceState.channel.let {
+            OhagiAudioManager.setupGuildAudio(event.guild!!, ch.id)
+        }
         event.replyComponents(
             simpleTitleAndDescriptionContainer("ボイスチャンネルに参加",
-                "${authorVoiceState.channel!!.asMention}に参加しました！",
+                "${ch.asMention}に参加しました！",
                 Color.GREEN))
             .queue()
     }
