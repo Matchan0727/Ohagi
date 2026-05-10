@@ -18,6 +18,7 @@ import io.ktor.server.config.*
 import jp.simplespace.discord.commands.HelpCommand
 import jp.simplespace.discord.commands.audio.ByeCommand
 import jp.simplespace.discord.commands.audio.JoinCommand
+import jp.simplespace.discord.commands.audio.SetSpeakerCommand
 import jp.simplespace.discord.listeners.ActionListener
 import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.OnlineStatus
@@ -89,6 +90,7 @@ object OhagiBot {
                 CalendarCommand(),
                 JoinCommand(),
                 ByeCommand(),
+                SetSpeakerCommand(),
             )
             .build()
         return commandClient

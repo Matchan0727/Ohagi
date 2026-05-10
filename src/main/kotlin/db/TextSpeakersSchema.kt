@@ -10,7 +10,7 @@ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 @Serializable
 data class TextSpeaker(val id: String, val name: String, val engine: String)
 
-class TextSpeakerService(database: Database) {
+class TextSpeakerService(private val database: Database) {
     object TextSpeakers : Table() {
         val id = varchar("id", 64)
         val name = varchar("name", 255)
@@ -22,6 +22,13 @@ class TextSpeakerService(database: Database) {
     init {
         transaction(database) {
             SchemaUtils.create(TextSpeakers)
+        }
+    }
+
+    fun exists(id: String): Boolean{
+        return !transaction(database) {
+            TextSpeakers.select(TextSpeakers.id)
+                .empty()
         }
     }
 
