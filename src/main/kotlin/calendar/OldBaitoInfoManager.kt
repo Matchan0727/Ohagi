@@ -31,10 +31,11 @@ class OldBaitoInfoManager {
             var current = nowDate
             if (nowDate.dayOfYear == start.dayOfYear) {
                 sb.append("今日はある(${start.format(timeFormatter)}～${end.format(timeFormatter)})\n")
+								current = start
             }
             else if (nowDate.isBefore(start)) {
                 sb.append(("今日はない\n${getDayStr(nowDate,start)}はある(${start.format(timeFormatter)}～${end.format(timeFormatter)})\n"))
-                current = start
+								current = start
             }
             else {
                 sb.append("今日はない\n")
