@@ -10,6 +10,7 @@ import io.ktor.server.routing.*
 import jp.simplespace.db.CalendarService
 import jp.simplespace.db.ExposedUser
 import jp.simplespace.db.UserService
+import jp.simplespace.db.TextSpeakerService
 import org.jetbrains.exposed.v1.jdbc.Database
 
 lateinit var database: Database
@@ -24,6 +25,7 @@ fun Application.configureDatabases() {
     )
     val userService = UserService(database)
     CalendarService(database)
+		TextSpeakerService(database)
     install(ContentNegotiation) {
         json()
     }
