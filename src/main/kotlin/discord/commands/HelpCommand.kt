@@ -27,7 +27,7 @@ class HelpCommand : SlashCommand() {
         if (commands == null) {
             commands = event.jda.retrieveCommands().complete()
         }
-        event.deferReply().queue { hook: InteractionHook ->
+        event.deferReply().useComponentsV2(false).queue { hook: InteractionHook ->
             val paginatorBuilder: ButtonEmbedPaginator.Builder = ButtonEmbedPaginator.Builder()
                 .waitOnSinglePage(false)
                 .setFinalAction { m: Message -> m.editMessageComponents().queue() }

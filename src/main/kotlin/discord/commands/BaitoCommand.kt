@@ -11,6 +11,6 @@ class BaitoCommand : SlashCommand() {
     }
 
     override fun execute(event: SlashCommandEvent) {
-        event.reply(OldBaitoInfoManager().getMessageText()).queue()
+        event.reply(OldBaitoInfoManager().getMessageText()).useComponentsV2(false).queue()
     }
 }
