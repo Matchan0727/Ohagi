@@ -41,7 +41,9 @@ class SetSpeakerCommand : SlashCommand() {
                 "話者の選択が不正です。",
                 Color.RED
             ))
-                .setEphemeral(true).queue()
+            .useComponentsV2()
+            .setEphemeral(true)
+            .queue()
             return
         }
         

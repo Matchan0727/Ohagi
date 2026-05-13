@@ -20,6 +20,7 @@ class ByeCommand : SlashCommand() {
                 simpleTitleAndDescriptionContainer("ボイスチャンネルにいません",
                     "Botはすでにボイスチャンネルから切断しています。",
                     Color.ORANGE))
+                .useComponentsV2()
                 .setEphemeral(true)
                 .queue()
             return
@@ -28,6 +29,7 @@ class ByeCommand : SlashCommand() {
         event.replyComponents(
             simpleTitleAndDescriptionContainer("ボイスチャンネルから切断",
                 "ボイスチャンネルから切断しました。"))
+            .useComponentsV2()
             .queue()
     }
 }

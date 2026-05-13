@@ -67,8 +67,6 @@ object OhagiBot {
                 AudioModuleConfig().withDaveSessionFactory(JDaveSessionFactory())
             )
         }
-        // デフォルトでCompoonentsV2を有効化
-        MessageRequest.setDefaultUseComponentsV2(true)
 
         jda.listener<ReadyEvent> {
             logger.info("正常に動作しています。")

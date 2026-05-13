@@ -29,6 +29,7 @@ class JoinCommand : SlashCommand() {
                 simpleTitleAndDescriptionContainer("ボイスチャンネルに参加済み",
                     "Botはすでにボイスチャンネルに参加しています。",
                     Color.ORANGE))
+                .useComponentsV2()
                 .setEphemeral(true)
                 .queue()
             return
@@ -41,6 +42,7 @@ class JoinCommand : SlashCommand() {
                 simpleTitleAndDescriptionContainer("ボイスチャンネルに未参加",
                     "ボイスチャンネルに参加してからこのコマンドを使用してください。",
                     Color.ORANGE))
+                .useComponentsV2()
                 .setEphemeral(true)
                 .queue()
             return
@@ -53,6 +55,7 @@ class JoinCommand : SlashCommand() {
             simpleTitleAndDescriptionContainer("ボイスチャンネルに参加",
                 "${ch.asMention}に参加しました！",
                 Color.GREEN))
+            .useComponentsV2()
             .queue()
     }
 }
