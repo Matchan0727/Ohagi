@@ -31,8 +31,10 @@ import net.dv8tion.jda.api.requests.GatewayIntent
 import net.dv8tion.jda.api.utils.MemberCachePolicy
 import net.dv8tion.jda.api.utils.cache.CacheFlag
 import net.dv8tion.jda.api.utils.messages.MessageRequest
+import okhttp3.OkHttpClient
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import java.util.concurrent.TimeUnit
 
 fun Application.configureDiscord() {
     OhagiBot.initialize(environment.config)
@@ -69,6 +71,12 @@ object OhagiBot {
             )
             setAudioModuleConfig(
                 AudioModuleConfig().withDaveSessionFactory(JDaveSessionFactory())
+            )
+            setHttpClientBuilder(
+                OkHttpClient.Builder()
+                    .connectTimeout(60, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .writeTimeout(60, TimeUnit.SECONDS)
             )
         }
 
