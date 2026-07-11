@@ -3,6 +3,7 @@ package jp.simplespace.audio
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.forms.MultiPartFormDataContent
 import io.ktor.client.request.forms.formData
@@ -13,6 +14,8 @@ import io.ktor.http.ContentType
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import java.nio.file.Files
@@ -28,8 +31,8 @@ class RvcApiClient(
     suspend fun separate(
         file: ByteArray,
         fileName: String,
-        modelName: String = DEFAULT_SEPARATE_MODEL,
-    ): JsonElement = postMultipart(
+        modelName: String = DEFAULT_UVR_MODEL,
+    ): ByteArray = postMultipartFile(
         path = "/api/v1/separate",
         file = file,
         fileName = fileName,
@@ -38,8 +41,10 @@ class RvcApiClient(
 
     suspend fun separate(
         file: Path,
-        modelName: String = DEFAULT_SEPARATE_MODEL,
-    ): JsonElement = separate(Files.readAllBytes(file), file.fileName.toString(), modelName)
+        modelName: String = DEFAULT_UVR_MODEL,
+    ): ByteArray = separate(withContext(Dispatchers.IO) {
+        Files.readAllBytes(file)
+    }, file.fileName.toString(), modelName)
 
     suspend fun convert(
         file: ByteArray,
@@ -49,7 +54,7 @@ class RvcApiClient(
         indexRate: Double = 0.75,
         protect: Double = 0.33,
         rvcVersion: String = DEFAULT_RVC_VERSION,
-    ): JsonElement = postMultipart(
+    ): ByteArray = postMultipartFile(
         path = "/api/v1/convert",
         file = file,
         fileName = fileName,
@@ -69,7 +74,9 @@ class RvcApiClient(
         indexRate: Double = 0.75,
         protect: Double = 0.33,
         rvcVersion: String = DEFAULT_RVC_VERSION,
-    ): JsonElement = convert(Files.readAllBytes(file), file.fileName.toString(), modelName, pitch, indexRate, protect, rvcVersion)
+    ): ByteArray = convert(withContext(Dispatchers.IO) {
+        Files.readAllBytes(file)
+    }, file.fileName.toString(), modelName, pitch, indexRate, protect, rvcVersion)
 
     suspend fun createCover(
         file: ByteArray,
@@ -81,7 +88,7 @@ class RvcApiClient(
         protect: Double = 0.33,
         rvcVersion: String = DEFAULT_RVC_VERSION,
         vocalVolumeAdjust: Double = 7.0,
-    ): JsonElement = postMultipart(
+    ): ByteArray = postMultipartFile(
         path = "/api/v1/cover",
         file = file,
         fileName = fileName,
@@ -105,8 +112,10 @@ class RvcApiClient(
         protect: Double = 0.33,
         rvcVersion: String = DEFAULT_RVC_VERSION,
         vocalVolumeAdjust: Double = 7.0,
-    ): JsonElement = createCover(
-        file = Files.readAllBytes(file),
+    ): ByteArray = createCover(
+        file = withContext(Dispatchers.IO) {
+            Files.readAllBytes(file)
+        },
         fileName = file.fileName.toString(),
         rvcModel = rvcModel,
         uvrModel = uvrModel,
@@ -121,7 +130,7 @@ class RvcApiClient(
         url {
             parameters.append("file_path", filePath)
         }
-    }.body()
+    }.body<ByteArray>()
 
     suspend fun listModels(): JsonElement = httpClient.get(fullUrl("/api/v1/models")).body()
 
@@ -133,12 +142,12 @@ class RvcApiClient(
         }
     }
 
-    private suspend fun postMultipart(
+    private suspend fun postMultipartFile(
         path: String,
         file: ByteArray,
         fileName: String,
         fields: List<Pair<String, String>>,
-    ): JsonElement = httpClient.post(fullUrl(path)) {
+    ): ByteArray = httpClient.post(fullUrl(path)) {
         setBody(
             MultiPartFormDataContent(
                 formData {
@@ -156,16 +165,21 @@ class RvcApiClient(
                 },
             ),
         )
-    }.body()
+    }.body<ByteArray>()
 
     private fun fullUrl(path: String): String = baseUrl.trimEnd('/') + path
 
     companion object {
-        const val DEFAULT_SEPARATE_MODEL = "UVR_MDXNET_KARA_2"
-        const val DEFAULT_UVR_MODEL = "UVR-MDX-NET-Inst_HQ_3"
+        const val DEFAULT_UVR_MODEL = "UVR-MDX-NET-Inst_HQ_5.onnx"
         const val DEFAULT_RVC_VERSION = "v2"
+        private const val LONG_TIMEOUT_MILLIS = 5 * 60 * 1000L
 
         fun defaultHttpClient(): HttpClient = HttpClient(CIO) {
+            install(HttpTimeout) {
+                requestTimeoutMillis = LONG_TIMEOUT_MILLIS
+                connectTimeoutMillis = LONG_TIMEOUT_MILLIS
+                socketTimeoutMillis = LONG_TIMEOUT_MILLIS
+            }
             install(ContentNegotiation) {
                 json(Json {
                     ignoreUnknownKeys = true

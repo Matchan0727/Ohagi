@@ -55,7 +55,6 @@ dependencies {
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.34.1")
     implementation("com.google.apis:google-api-services-calendar:v3-rev20220715-2.0.0")
     testImplementation("io.ktor:ktor-server-test-host")
-    testImplementation("io.ktor:ktor-client-mock")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.3.21")
     // その他
     implementation("org.openjdk.nashorn:nashorn-core:15.7")

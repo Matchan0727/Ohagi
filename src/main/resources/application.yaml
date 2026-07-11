@@ -13,3 +13,6 @@ db:
 discord:
   token: ${DISCORD_TOKEN}
   owner_id: ${DISCORD_OWNER_ID}
+
+rvc_api:
+  base_url: ${RVC_API_BASE_URL}

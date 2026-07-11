@@ -18,8 +18,10 @@ import io.ktor.server.config.*
 import jp.simplespace.discord.commands.HelpCommand
 import jp.simplespace.discord.commands.audio.ByeCommand
 import jp.simplespace.discord.commands.audio.JoinCommand
+import jp.simplespace.discord.commands.audio.RvcCommand
 import jp.simplespace.discord.commands.audio.SetSpeakerCommand
 import jp.simplespace.discord.listeners.ActionListener
+import jp.simplespace.audio.RvcApiClient
 import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.OnlineStatus
 import net.dv8tion.jda.api.audio.AudioModuleConfig
@@ -42,6 +44,7 @@ object OhagiBot {
     lateinit var config: ApplicationConfig
     lateinit var discordConfig: ApplicationConfig
     lateinit var commandClient: CommandClient
+    lateinit var rvcApiClient: RvcApiClient
     val eventWaiter: EventWaiter = EventWaiter()
     val logger: Logger = LoggerFactory.getLogger(OhagiBot::class.java)
     val audioPlayerManager: AudioPlayerManager = DefaultAudioPlayerManager()
@@ -54,6 +57,7 @@ object OhagiBot {
         this.config = config
         this.discordConfig = config.config("discord")
         setupAudioPlayerManager()
+        rvcApiClient = setupRvcApiClient()
         jda = default(discordConfig.property("token").getString(), enableCoroutines = true) {
             intents += GatewayIntent.entries
             setMemberCachePolicy(MemberCachePolicy.ALL)
@@ -89,9 +93,15 @@ object OhagiBot {
                 JoinCommand(),
                 ByeCommand(),
                 SetSpeakerCommand(),
+                RvcCommand(rvcApiClient),
             )
             .build()
         return commandClient
+    }
+
+    private fun setupRvcApiClient(): RvcApiClient {
+        val baseUrl = config.property("rvc_api.base_url").getString()
+        return RvcApiClient(baseUrl)
     }
 
     private fun setupAudioPlayerManager() {
