@@ -170,7 +170,7 @@ class RvcApiClient(
     private fun fullUrl(path: String): String = baseUrl.trimEnd('/') + path
 
     companion object {
-        const val DEFAULT_UVR_MODEL = "UVR-MDX-NET-Inst_HQ_5.onnx"
+        const val DEFAULT_UVR_MODEL = "UVR-MDX-NET-Inst_HQ_3.onnx"
         const val DEFAULT_RVC_VERSION = "v2"
         private const val LONG_TIMEOUT_MILLIS = 5 * 60 * 1000L
 
