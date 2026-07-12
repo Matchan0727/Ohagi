@@ -18,6 +18,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import net.dv8tion.jda.api.interactions.InteractionContextType
 import net.dv8tion.jda.api.interactions.commands.Command
 import java.io.ByteArrayInputStream
 import java.nio.file.Files
@@ -27,7 +28,7 @@ import kotlin.io.path.outputStream
 import java.util.zip.ZipInputStream
 import kotlin.io.path.nameWithoutExtension
 
-class RvcCommand(private val rvcApiClient: RvcApiClient) : SlashCommand() {
+class RvcCommand(rvcApiClient: RvcApiClient) : SlashCommand() {
     init {
         name = "rvc"
         help = "RVC/UVRの音声処理を行います"
@@ -37,6 +38,7 @@ class RvcCommand(private val rvcApiClient: RvcApiClient) : SlashCommand() {
             ConvertCommand(rvcApiClient),
             CoverCommand(rvcApiClient),
         )
+        this.contexts = InteractionContextType.ALL.toTypedArray()
     }
 
     override fun execute(event: SlashCommandEvent) {}
