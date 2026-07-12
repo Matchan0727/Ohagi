@@ -25,6 +25,7 @@ import java.nio.file.Path
 import java.awt.Color
 import kotlin.io.path.outputStream
 import java.util.zip.ZipInputStream
+import kotlin.io.path.nameWithoutExtension
 
 class RvcCommand(private val rvcApiClient: RvcApiClient) : SlashCommand() {
     init {
@@ -289,8 +290,8 @@ private class CoverCommand(
 }
 
 private fun outputFileName(prefix: String, file: Path): String {
-    val original = file.fileName.toString()
-    return "$prefix-$original"
+    val original = file.nameWithoutExtension
+    return "$prefix-$original.wav"
 }
 
 private data class NamedFile(
