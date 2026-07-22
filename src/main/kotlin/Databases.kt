@@ -26,9 +26,6 @@ fun Application.configureDatabases() {
     val userService = UserService(database)
     CalendarService(database)
 		TextSpeakerService(database)
-    install(ContentNegotiation) {
-        json()
-    }
     routing {
         // Create user
         post("/users") {

@@ -1,6 +1,8 @@
 package jp.simplespace
 
+import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.*
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import jp.simplespace.discord.configureDiscord
 
 fun main(args: Array<String>) {
@@ -9,6 +11,9 @@ fun main(args: Array<String>) {
 }
 
 fun Application.module() {
+    install(ContentNegotiation) {
+        json()
+    }
     configureTemplating()
     configureSerialization()
     configureDatabases()
