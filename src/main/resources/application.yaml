@@ -16,3 +16,6 @@ discord:
 
 rvc_api:
   base_url: ${RVC_API_BASE_URL}
+
+switchbot:
+  mac_address: ${SWITCHBOT_MAC_ADDRESS}

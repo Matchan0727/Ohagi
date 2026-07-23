@@ -10,6 +10,7 @@ import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager
 import com.sedmelluq.discord.lavaplayer.source.AudioSourceManagers
 import command.BaitoCommand
 import command.CalendarCommand
+import data.SwitchBotEvent
 import dev.minn.jda.ktx.events.listener
 import dev.minn.jda.ktx.jdabuilder.default
 import dev.minn.jda.ktx.jdabuilder.intents
@@ -50,6 +51,13 @@ object OhagiBot {
     val eventWaiter: EventWaiter = EventWaiter()
     val logger: Logger = LoggerFactory.getLogger(OhagiBot::class.java)
     val audioPlayerManager: AudioPlayerManager = DefaultAudioPlayerManager()
+    var currentSwitchBotEvent: SwitchBotEvent? = null
+        set(value) {
+            field = value?: return
+            val temp = value.context.temperature
+            val humidity = value.context.humidity
+            jda.presence.activity = Activity.customStatus("🌡️${temp}℃ 💧${humidity}%")
+        }
 
     private var isInitialized = false
 

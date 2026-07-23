@@ -17,6 +17,6 @@ fun Application.module() {
     configureTemplating()
     configureSerialization()
     configureDatabases()
-    configureRouting()
     configureDiscord()
+    configureRouting()
 }
