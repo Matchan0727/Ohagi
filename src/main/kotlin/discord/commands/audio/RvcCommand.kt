@@ -4,7 +4,9 @@ import com.jagrosh.jdautilities.command.SlashCommand
 import com.jagrosh.jdautilities.command.SlashCommandEvent
 import dev.minn.jda.ktx.interactions.components.FileDisplay
 import jp.simplespace.audio.RvcApiClient
+import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
+import kotlinx.coroutines.launch
 import net.dv8tion.jda.api.components.container.Container
 import net.dv8tion.jda.api.components.textdisplay.TextDisplay
 import net.dv8tion.jda.api.entities.Message
@@ -12,7 +14,6 @@ import net.dv8tion.jda.api.interactions.InteractionHook
 import net.dv8tion.jda.api.interactions.commands.OptionType
 import net.dv8tion.jda.api.interactions.commands.build.OptionData
 import net.dv8tion.jda.api.utils.FileUpload
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -71,9 +72,9 @@ private abstract class RvcChildCommand(
         return tempFile
     }
 
-    protected fun withTempAttachment(
+    protected suspend fun withTempAttachment(
         event: SlashCommandEvent,
-        block: (Path, Message.Attachment) -> Unit,
+        block: suspend (Path, Message.Attachment) -> Unit,
     ) {
         val attachment = requireAttachment(event)
         val file = downloadAttachmentToTempFile(attachment)
@@ -86,10 +87,19 @@ private abstract class RvcChildCommand(
 
     protected fun deferAndQueue(
         event: SlashCommandEvent,
-        block: (InteractionHook) -> Unit,
+        block: suspend (InteractionHook) -> Unit,
     ) {
         event.deferReply().queue { hook ->
-            block(hook)
+            OhagiBot.scope.launch {
+                try {
+                    block(hook)
+                } catch (e: Exception) {
+                    OhagiBot.logger.error("RVCコマンドの実行中にエラーが発生しました: ${event.fullCommandName}", e)
+                    hook.editOriginalComponents(errorContainer("処理中にエラーが発生しました: ${e.message ?: e::class.simpleName}"))
+                        .useComponentsV2()
+                        .queue()
+                }
+            }
         }
     }
 
@@ -142,9 +152,7 @@ private class SeparateCommand(
             withTempAttachment(event) { file, _ ->
                 val modelName = event.optString("model_name", RvcApiClient.DEFAULT_UVR_MODEL)
                     ?: RvcApiClient.DEFAULT_UVR_MODEL
-                val response = runBlocking {
-                    rvcApiClient.separate(file, modelName)
-                }
+                val response = rvcApiClient.separate(file, modelName)
                 val files = unzipFiles(response)
                 if (files.isEmpty()) {
                     hook.editOriginalComponents(errorContainer("分離結果のZIPを展開できませんでした"))
@@ -173,9 +181,7 @@ private class ModelsCommand(
 
     override fun execute(event: SlashCommandEvent) {
         deferAndQueue(event) { hook ->
-            val models = runBlocking {
-                rvcApiClient.listModels()
-            }
+            val models = rvcApiClient.listModels()
             val rvcModels = readModelArray(models, "rvc")
             val uvrModels = readModelArray(models, "uvr")
             replyModels(
@@ -215,16 +221,14 @@ private class ConvertCommand(
             val resolvedModelName = modelName
 
             withTempAttachment(event) { file, _ ->
-                val response = runBlocking {
-                    rvcApiClient.convert(
-                        file = file,
-                        modelName = resolvedModelName,
-                        pitch = event.optLong("pitch", 0).toInt(),
-                        indexRate = event.optDouble("index_rate", 0.75),
-                        protect = event.optDouble("protect", 0.33),
-                        rvcVersion = event.optString("rvc_version", RvcApiClient.DEFAULT_RVC_VERSION) ?: RvcApiClient.DEFAULT_RVC_VERSION,
-                    )
-                }
+                val response = rvcApiClient.convert(
+                    file = file,
+                    modelName = resolvedModelName,
+                    pitch = event.optLong("pitch", 0).toInt(),
+                    indexRate = event.optDouble("index_rate", 0.75),
+                    protect = event.optDouble("protect", 0.33),
+                    rvcVersion = event.optString("rvc_version", RvcApiClient.DEFAULT_RVC_VERSION) ?: RvcApiClient.DEFAULT_RVC_VERSION,
+                )
                 replyFile(
                     hook = hook,
                     title = "RVC変換完了",
@@ -267,18 +271,16 @@ private class CoverCommand(
             val resolvedRvcModel = rvcModel
 
             withTempAttachment(event) { file, _ ->
-                val response = runBlocking {
-                    rvcApiClient.createCover(
-                        file = file,
-                        rvcModel = resolvedRvcModel,
-                        uvrModel = event.optString("uvr_model", RvcApiClient.DEFAULT_UVR_MODEL) ?: RvcApiClient.DEFAULT_UVR_MODEL,
-                        pitch = event.optLong("pitch", 0).toInt(),
-                        indexRate = event.optDouble("index_rate", 0.75),
-                        protect = event.optDouble("protect", 0.33),
-                        rvcVersion = event.optString("rvc_version", RvcApiClient.DEFAULT_RVC_VERSION) ?: RvcApiClient.DEFAULT_RVC_VERSION,
-                        vocalVolumeAdjust = event.optDouble("vocal_volume_adjust", 7.0),
-                    )
-                }
+                val response = rvcApiClient.createCover(
+                    file = file,
+                    rvcModel = resolvedRvcModel,
+                    uvrModel = event.optString("uvr_model", RvcApiClient.DEFAULT_UVR_MODEL) ?: RvcApiClient.DEFAULT_UVR_MODEL,
+                    pitch = event.optLong("pitch", 0).toInt(),
+                    indexRate = event.optDouble("index_rate", 0.75),
+                    protect = event.optDouble("protect", 0.33),
+                    rvcVersion = event.optString("rvc_version", RvcApiClient.DEFAULT_RVC_VERSION) ?: RvcApiClient.DEFAULT_RVC_VERSION,
+                    vocalVolumeAdjust = event.optDouble("vocal_volume_adjust", 7.0),
+                )
                 replyFile(
                     hook = hook,
                     title = "カバー生成完了",

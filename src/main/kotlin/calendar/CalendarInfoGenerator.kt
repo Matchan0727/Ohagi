@@ -1,8 +1,7 @@
 package calendar
 
 import com.google.api.client.util.DateTime
-import jp.simplespace.database
-import jp.simplespace.db.CalendarService
+import jp.simplespace.calendarService
 import jp.simplespace.discord.OhagiBot
 import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.components.actionrow.ActionRow
@@ -17,8 +16,9 @@ import java.util.*
 import java.util.concurrent.TimeUnit
 
 object CalendarInfoGenerator {
-    val jda: JDA = OhagiBot.jda
-    val calendar = CalendarController.getCalendar()
+    val jda: JDA
+        get() = OhagiBot.jda
+    val calendar by lazy { CalendarController.getCalendar() }
     val zoneId = ZoneId.of("Asia/Tokyo")
 
     fun generateContainer(maxSize: Int = 10, timeMin: Long? = System.currentTimeMillis(), timeMax: Long? = null): Container {
@@ -85,7 +85,7 @@ object CalendarInfoGenerator {
 
     fun generateSortedScheduleList(maxSize: Int, timeMin: Long? = System.currentTimeMillis(), timeMax: Long? = null): List<Schedule> {
         val schedules = mutableListOf<Schedule>()
-        val calendarIdMap = CalendarService(database).getIdMapping()
+        val calendarIdMap = calendarService.getIdMapping()
         top@ for ((userId, calendarId) in calendarIdMap) {
             val list = calendar.events().list(calendarId)
                 .setMaxResults(10)

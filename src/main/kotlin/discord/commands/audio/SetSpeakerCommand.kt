@@ -46,6 +46,13 @@ class SetSpeakerCommand : SlashCommand() {
             .queue()
             return
         }
-        
+        event.replyComponents(simpleTitleAndDescriptionContainer(
+            "未実装",
+            "話者設定の保存機能は現在準備中です。",
+            Color.ORANGE
+        ))
+            .useComponentsV2()
+            .setEphemeral(true)
+            .queue()
     }
 }

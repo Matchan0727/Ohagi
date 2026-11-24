@@ -8,12 +8,16 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import jp.simplespace.db.CalendarService
+import jp.simplespace.db.CommandPermissionService
 import jp.simplespace.db.ExposedUser
 import jp.simplespace.db.UserService
 import jp.simplespace.db.TextSpeakerService
 import org.jetbrains.exposed.v1.jdbc.Database
 
 lateinit var database: Database
+lateinit var calendarService: CalendarService
+lateinit var textSpeakerService: TextSpeakerService
+lateinit var commandPermissionService: CommandPermissionService
 
 fun Application.configureDatabases() {
     val config = environment.config.config("db")
@@ -24,8 +28,9 @@ fun Application.configureDatabases() {
         password = config.property("password").getString(),
     )
     val userService = UserService(database)
-    CalendarService(database)
-		TextSpeakerService(database)
+    calendarService = CalendarService(database)
+    textSpeakerService = TextSpeakerService(database)
+    commandPermissionService = CommandPermissionService(database)
     routing {
         // Create user
         post("/users") {

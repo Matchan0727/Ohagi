@@ -4,6 +4,7 @@ import com.jagrosh.jdautilities.command.SlashCommand
 import com.jagrosh.jdautilities.command.SlashCommandEvent
 import com.mysql.cj.jdbc.MysqlDataSource
 import io.ktor.server.config.*
+import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.Embeds
 import jp.simplespace.discord.utils.ResultSetToJsonMapper
 import net.dv8tion.jda.api.EmbedBuilder
@@ -31,24 +32,23 @@ class SQLMod(val dbConfig: ApplicationConfig) : SlashCommand() {
                 ds.setUrl(dbConfig.property("url").getString())
                 ds.user = dbConfig.property("user").getString()
                 ds.password = dbConfig.property("password").getString()
-                val con = ds.connection
-                val stmt = con.createStatement()
-                val rs = stmt.executeQuery(sql)
-                val jarray = ResultSetToJsonMapper.mapResultSet(rs)
-                rs.close()
-                stmt.close()
-                con.close()
+                val jarray = ds.connection.use { con ->
+                    con.createStatement().use { stmt ->
+                        stmt.executeQuery(sql).use { rs ->
+                            ResultSetToJsonMapper.mapResultSet(rs)
+                        }
+                    }
+                }
                 val eb = EmbedBuilder()
-                val sb = StringBuilder()
-                sb.append(jarray).setLength(1000)
+                val resultText = jarray.toString().take(1000)
                 eb.setTitle("SQLの実行結果")
                     .setColor(Color.decode("#36b8fa"))
                     .setTimestamp(Date().toInstant())
-                    .setDescription("```json\n$sb\n```")
+                    .setDescription("```json\n$resultText\n```")
                 hook.editOriginalEmbeds(eb.build()).queue()
             } catch (e: Exception) {
+                OhagiBot.logger.error("SQL実行中にエラーが発生しました", e)
                 hook.editOriginalEmbeds(Embeds.getCustomError("例外が発生しました", e.localizedMessage)).queue()
-                throw RuntimeException(e)
             }
         }
     }

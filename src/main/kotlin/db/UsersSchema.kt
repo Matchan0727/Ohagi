@@ -10,7 +10,7 @@ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 @Serializable
 data class ExposedUser(val name: String, val age: Int)
 
-class UserService(database: Database) {
+class UserService(private val database: Database) {
     object Users : Table() {
         val id = integer("id").autoIncrement()
         val name = varchar("name", length = 50)
@@ -57,5 +57,5 @@ class UserService(database: Database) {
     }
 
     private suspend fun <T> dbQuery(block: suspend () -> T): T =
-        suspendTransaction { block() }
+        suspendTransaction(db = database) { block() }
 }

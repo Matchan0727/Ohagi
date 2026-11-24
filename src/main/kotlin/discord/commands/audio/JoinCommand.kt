@@ -48,9 +48,7 @@ class JoinCommand : SlashCommand() {
             return
         }
         val ch = vc ?: authorVoiceState.channel!!
-        authorVoiceState.channel.let {
-            OhagiAudioManager.setupGuildAudio(event.guild!!, ch.id)
-        }
+        OhagiAudioManager.setupGuildAudio(event.guild!!, ch.id)
         event.replyComponents(
             simpleTitleAndDescriptionContainer("ボイスチャンネルに参加",
                 "${ch.asMention}に参加しました！",

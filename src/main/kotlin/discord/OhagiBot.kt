@@ -23,6 +23,9 @@ import jp.simplespace.discord.commands.audio.RvcCommand
 import jp.simplespace.discord.commands.audio.SetSpeakerCommand
 import jp.simplespace.discord.listeners.ActionListener
 import jp.simplespace.audio.RvcApiClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.OnlineStatus
 import net.dv8tion.jda.api.audio.AudioModuleConfig
@@ -50,14 +53,20 @@ object OhagiBot {
     lateinit var rvcApiClient: RvcApiClient
     val eventWaiter: EventWaiter = EventWaiter()
     val logger: Logger = LoggerFactory.getLogger(OhagiBot::class.java)
+    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val audioPlayerManager: AudioPlayerManager = DefaultAudioPlayerManager()
     var currentSwitchBotEvent: SwitchBotEvent? = null
         set(value) {
-            field = value?: return
-            val temp = value.context.temperature
-            val humidity = value.context.humidity
-            jda.presence.activity = Activity.customStatus("🌡️${temp}℃ 💧${humidity}%")
+            field = value ?: return
+            updateSwitchBotPresence(value)
         }
+
+    private fun updateSwitchBotPresence(event: SwitchBotEvent) {
+        if (!::jda.isInitialized) return
+        val temp = event.context.temperature
+        val humidity = event.context.humidity
+        jda.presence.activity = Activity.customStatus("🌡️${temp}℃ 💧${humidity}%")
+    }
 
     private var isInitialized = false
 
@@ -89,6 +98,7 @@ object OhagiBot {
         }
 
         jda.listener<ReadyEvent> {
+            currentSwitchBotEvent?.let { updateSwitchBotPresence(it) }
             logger.info("正常に動作しています。")
         }
 

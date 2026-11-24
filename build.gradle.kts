@@ -4,9 +4,9 @@ val jda_version: String by project
 val jda_ktx_version: String by project
 
 plugins {
-    kotlin("jvm") version "2.3.21"
-    id("io.ktor.plugin") version "3.4.3"
-    id("org.jetbrains.kotlin.plugin.serialization") version "2.3.21"
+    kotlin("jvm") version "2.4.21"
+    id("io.ktor.plugin") version "3.6.1"
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.4.21"
 }
 
 group = "jp.simplespace"
@@ -37,10 +37,10 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-core:$exposed_version")
     implementation("org.jetbrains.exposed:exposed-dao:$exposed_version")
     implementation("org.jetbrains.exposed:exposed-jdbc:$exposed_version")
-    implementation("com.mysql:mysql-connector-j:9.5.0")
+    implementation("com.mysql:mysql-connector-j:26.10.0")
     // JDA系
     implementation("net.dv8tion:JDA:$jda_version")
-    implementation("dev.arbjerg:lavaplayer:2.2.6")
+    implementation("dev.arbjerg:lavaplayer:2.2.7")
     // Interface to use for libraries
     implementation("club.minnced:jdave-api:0.1.8")
     // Compiled natives for libdave for the specified platform
@@ -55,11 +55,10 @@ dependencies {
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.34.1")
     implementation("com.google.apis:google-api-services-calendar:v3-rev20220715-2.0.0")
     testImplementation("io.ktor:ktor-server-test-host")
-    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.3.21")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.4.21")
     // その他
     implementation("org.openjdk.nashorn:nashorn-core:15.7")
     implementation("ch.qos.logback:logback-classic:${logback_version}")
-    implementation("org.jsoup:jsoup:1.21.2")
 }
 
 kotlin {

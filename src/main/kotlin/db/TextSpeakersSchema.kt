@@ -25,9 +25,10 @@ class TextSpeakerService(private val database: Database) {
         }
     }
 
-    fun exists(id: String): Boolean{
+    fun exists(id: String): Boolean {
         return !transaction(database) {
             TextSpeakers.select(TextSpeakers.id)
+                .where { TextSpeakers.id eq id }
                 .empty()
         }
     }
@@ -65,5 +66,5 @@ class TextSpeakerService(private val database: Database) {
     }
 
     private suspend fun <T> dbQuery(block: suspend () -> T): T =
-        suspendTransaction { block() }
+        suspendTransaction(db = database) { block() }
 }
