@@ -15,6 +15,7 @@ import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
 data class CommandPermission(
@@ -103,13 +104,27 @@ class CommandPermissionService(private val database: Database) {
         return allowed
     }
 
+    private val botDmChannelCache = ConcurrentHashMap<String, String>()
+
     private fun isBotDm(interaction: Interaction): Boolean {
         if (interaction.context == InteractionContextType.BOT_DM) return true
         val channel = interaction.channel ?: return false
         if (channel.type != ChannelType.PRIVATE) return false
         if (!channel.isDetached) return true
         if ((channel as? PrivateChannel)?.user?.id == interaction.user.id) return true
-        return interaction.jda.getPrivateChannelById(channel.id) != null
+        if (interaction.jda.getPrivateChannelById(channel.id) != null) return true
+
+        val userId = interaction.user.id
+        val cachedDmId = botDmChannelCache[userId]
+        if (cachedDmId != null) {
+            return cachedDmId == channel.id
+        }
+
+        val openedDmId = runCatching {
+            interaction.user.openPrivateChannel().complete().id
+        }.getOrNull() ?: return false
+        botDmChannelCache[userId] = openedDmId
+        return openedDmId == channel.id
     }
 
     /**
