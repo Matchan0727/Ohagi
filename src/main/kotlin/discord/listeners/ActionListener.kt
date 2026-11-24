@@ -25,6 +25,9 @@ class ActionListener : ListenerAdapter() {
             id == "calreset" -> {
                 updateCalendar(event) { CalendarInfoGenerator.generateContainer() }
             }
+            id == "calrefresh" -> {
+                updateCalendar(event) { CalendarInfoGenerator.generateContainer(forceRefresh = true) }
+            }
             id == "clear" -> {
                 event.deferEdit().queue {
                     it.deleteOriginal().queue()
@@ -35,7 +38,7 @@ class ActionListener : ListenerAdapter() {
 
     private fun updateCalendar(
         event: ButtonInteractionEvent,
-        generator: () -> net.dv8tion.jda.api.components.container.Container,
+        generator: suspend () -> net.dv8tion.jda.api.components.container.Container,
     ) {
         if (!commandPermissionService.isAllowed("calendar", event.guild?.id, event.channel.id)) {
             event.replyComponents(
