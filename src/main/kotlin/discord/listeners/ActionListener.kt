@@ -14,19 +14,19 @@ class ActionListener : ListenerAdapter() {
     override fun onButtonInteraction(event: ButtonInteractionEvent) {
         val id = event.button.customId ?: return
         when {
-            id.startsWith("calnext_") -> {
-                val timeMin = id.substringAfter("calnext_").toLongOrNull() ?: return
-                updateCalendar(event) { CalendarInfoGenerator.generateContainer(timeMin = timeMin) }
+            id.startsWith("calpage_") -> {
+                val page = id.substringAfter("calpage_").toIntOrNull() ?: return
+                updateCalendar(event) { CalendarInfoGenerator.generateContainer(page = page) }
             }
-            id.startsWith("calprev_") -> {
-                val timeMax = id.substringAfter("calprev_").toLongOrNull() ?: return
-                updateCalendar(event) { CalendarInfoGenerator.generateContainer(timeMin = null, timeMax = timeMax) }
-            }
-            id == "calreset" -> {
-                updateCalendar(event) { CalendarInfoGenerator.generateContainer() }
+            id.startsWith("calrefresh_") -> {
+                val page = id.substringAfter("calrefresh_").toIntOrNull() ?: 0
+                updateCalendar(event) { CalendarInfoGenerator.generateContainer(page = page, forceRefresh = true) }
             }
             id == "calrefresh" -> {
-                updateCalendar(event) { CalendarInfoGenerator.generateContainer(forceRefresh = true) }
+                updateCalendar(event) { CalendarInfoGenerator.generateContainer(page = 0, forceRefresh = true) }
+            }
+            id == "calreset" || id.startsWith("calnext_") || id.startsWith("calprev_") -> {
+                updateCalendar(event) { CalendarInfoGenerator.generateContainer(page = 0) }
             }
             id == "clear" -> {
                 event.deferEdit().queue {

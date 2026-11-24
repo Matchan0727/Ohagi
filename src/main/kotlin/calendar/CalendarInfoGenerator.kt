@@ -17,25 +17,23 @@ import net.dv8tion.jda.api.components.textdisplay.TextDisplay
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.util.*
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 object CalendarInfoGenerator {
     private const val EVENT_FIELDS = "items(htmlLink,summary,start,end,location)"
+    private const val MAX_RESULTS_PER_CALENDAR = 250
     private val CACHE_TTL_MILLIS = TimeUnit.MINUTES.toMillis(3)
-
-    private data class CacheKey(
-        val maxSize: Int,
-        val timeMin: Long?,
-        val timeMax: Long?,
-    )
+    private val PAST_WINDOW_MILLIS = TimeUnit.DAYS.toMillis(90)
+    private val FUTURE_WINDOW_MILLIS = TimeUnit.DAYS.toMillis(180)
+    private val URL_REGEX = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
 
     private data class CacheEntry(
         val schedules: List<Schedule>,
         val cachedAt: Long,
     )
 
-    private val scheduleCache = ConcurrentHashMap<CacheKey, CacheEntry>()
+    @Volatile
+    private var scheduleCache: CacheEntry? = null
 
     val jda: JDA
         get() = OhagiBot.jda
@@ -43,32 +41,57 @@ object CalendarInfoGenerator {
     val zoneId = ZoneId.of("Asia/Tokyo")
 
     fun clearCache() {
-        scheduleCache.clear()
+        scheduleCache = null
     }
 
     suspend fun generateContainer(
         maxSize: Int = 10,
-        timeMin: Long? = null,
-        timeMax: Long? = null,
+        page: Int = 0,
         forceRefresh: Boolean = false,
     ): Container {
-        val list = generateSortedScheduleList(maxSize, timeMin, timeMax, forceRefresh)
+        val allSchedules = getAllSortedSchedules(forceRefresh)
+        val nowInstant = Instant.now()
+        val initialIndex = allSchedules.indexOfFirst { schedule ->
+            val end = schedule.endTime ?: schedule.endDate
+            end != null && end.isAfter(nowInstant)
+        }.let { if (it == -1) allSchedules.size else it }
+
+        val (startIdx, endIdx) = if (page >= 0) {
+            val start = minOf(initialIndex + page * maxSize, allSchedules.size)
+            val end = minOf(start + maxSize, allSchedules.size)
+            start to end
+        } else {
+            val end = maxOf(0, initialIndex + (page + 1) * maxSize)
+            val start = maxOf(0, end - maxSize)
+            start to end
+        }
+
+        val list = if (startIdx < endIdx) allSchedules.subList(startIdx, endIdx) else emptyList()
+        val hasPrev = startIdx > 0
+        val hasNext = endIdx < allSchedules.size
+
+        val prevButton = Button.secondary("calpage_${page - 1}", "◀️前").withDisabled(!hasPrev)
+        val nextButton = Button.secondary("calpage_${page + 1}", "▶️次").withDisabled(!hasNext)
         val resetButton = Button.secondary("calreset", "🔄最初に戻る")
-        val refreshButton = Button.secondary("calrefresh", "🔄更新")
+        val refreshButton = Button.secondary("calrefresh_$page", "🔄更新")
         val clearButton = Button.secondary("clear", "🗑️")
+
         if (list.isEmpty()) {
+            val emptyButtons = buildList {
+                if (hasPrev) add(prevButton)
+                if (page != 0) add(resetButton)
+                add(refreshButton)
+                add(clearButton)
+            }
             return Container.of(
                 TextDisplay.of("# 予定はありません\nGoogleカレンダーから取得した予定がありません。"),
                 Separator.createInvisible(Separator.Spacing.SMALL),
-                ActionRow.of(
-                    resetButton,
-                    refreshButton,
-                    clearButton
-                )
+                ActionRow.of(emptyButtons)
             )
         }
         val topDisplay = TextDisplay.of("# 予定一覧\nGoogleカレンダーから取得した予定です。")
         val sections = list.map { schedule ->
+            val formattedLocation = formatLocation(schedule.location)
             Section.of(
                 Button.link(schedule.link, "表示"),
                 TextDisplay.of(
@@ -78,33 +101,18 @@ object CalendarInfoGenerator {
                                 "\n%s",
                         schedule.user.asMention, schedule.title ?: "タイトルなし",
                         dateFormatFromInstant(schedule), timeRangeFormatFromInstant(schedule),
-                        if (schedule.location.isNullOrBlank()) "" else "-# 場所: ${schedule.location}"
+                        if (formattedLocation == null) "" else "-# 場所: $formattedLocation"
                     )
                 )
             )
         }
-        var lastSchedule = list.first()
-        for (schedule in list.reversed()) {
-            if (dateEquals(schedule)) {
-                lastSchedule = schedule
-                break
-            }
+        val actionRows = buildList {
+            add(prevButton)
+            add(nextButton)
+            if (page != 0) add(resetButton)
+            add(refreshButton)
+            add(clearButton)
         }
-        val lastDate = (lastSchedule.endTime?: lastSchedule.endDate!!)
-        var firstSchedule = list.first()
-        for (schedule in list) {
-            if (dateEquals(schedule)) {
-                firstSchedule = schedule
-                break
-            }
-        }
-        val preDate = (firstSchedule.startTime?: firstSchedule.startDate!!)
-        val actionRows = mutableListOf(
-            Button.secondary("calprev_${preDate.toEpochMilli()}", "◀️前"),
-            Button.secondary("calnext_${lastDate.toEpochMilli()}", "▶️次"),
-            refreshButton,
-            clearButton
-        )
         return Container.of(
             topDisplay,
             Separator.createDivider(Separator.Spacing.LARGE),
@@ -116,42 +124,34 @@ object CalendarInfoGenerator {
         )
     }
 
-    suspend fun generateSortedScheduleList(
-        maxSize: Int,
-        timeMin: Long? = null,
-        timeMax: Long? = null,
-        forceRefresh: Boolean = false,
-    ): List<Schedule> {
-        val cacheKey = CacheKey(maxSize, timeMin, timeMax)
+    suspend fun getAllSortedSchedules(forceRefresh: Boolean = false): List<Schedule> {
         val now = System.currentTimeMillis()
         if (forceRefresh) {
-            scheduleCache.clear()
+            scheduleCache = null
         } else {
-            val cached = scheduleCache[cacheKey]
+            val cached = scheduleCache
             if (cached != null && now - cached.cachedAt < CACHE_TTL_MILLIS) {
                 return cached.schedules
             }
         }
 
+        val timeMin = DateTime(now - PAST_WINDOW_MILLIS)
+        val timeMax = DateTime(now + FUTURE_WINDOW_MILLIS)
         val calendarIdMap = calendarService.getIdMapping()
         val schedules = coroutineScope {
             calendarIdMap.mapNotNull { (userId, calendarId) ->
                 val user = jda.getUserById(userId) ?: return@mapNotNull null
                 async(Dispatchers.IO) {
-                    val request = calendar.events().list(calendarId)
-                        .setMaxResults(10)
+                    val events = calendar.events().list(calendarId)
+                        .setTimeMin(timeMin)
+                        .setTimeMax(timeMax)
+                        .setMaxResults(MAX_RESULTS_PER_CALENDAR)
                         .setOrderBy("startTime")
                         .setSingleEvents(true)
                         .setFields(EVENT_FIELDS)
-                    if (timeMax != null) {
-                        request.setTimeMax(DateTime(timeMax))
-                            .setTimeMin(DateTime(timeMax - TimeUnit.DAYS.toMillis(90)))
-                            .setMaxResults(100)
-                    } else {
-                        request.setTimeMin(DateTime(timeMin ?: now))
-                    }
-                    var events = request.execute().items.orEmpty()
-                    if (timeMax != null) events = events.takeLast(maxSize)
+                        .execute()
+                        .items
+                        .orEmpty()
 
                     events.map { event ->
                         Schedule(
@@ -169,10 +169,11 @@ object CalendarInfoGenerator {
             }.awaitAll().flatten()
         }
 
-        val sorted = schedules.sortedBy { it.startTime ?: it.startDate }
-        val result = if (timeMax != null) sorted.takeLast(maxSize) else sorted.take(maxSize)
-        scheduleCache[cacheKey] = CacheEntry(result, System.currentTimeMillis())
-        return result
+        val sorted = schedules.sortedWith(
+            compareBy<Schedule>({ it.startTime ?: it.startDate }, { it.endTime ?: it.endDate })
+        )
+        scheduleCache = CacheEntry(sorted, System.currentTimeMillis())
+        return sorted
     }
 
     fun dateTimeToInstant(dateTime: DateTime?): Instant? {
@@ -230,6 +231,12 @@ object CalendarInfoGenerator {
 
     fun dateEquals(z1: ZonedDateTime, z2: ZonedDateTime): Boolean {
         return z1.year == z2.year && z1.month == z2.month && z1.dayOfMonth == z2.dayOfMonth
+    }
+
+    private fun formatLocation(location: String?): String? {
+        if (location.isNullOrBlank()) return null
+        val cleaned = location.replace(URL_REGEX, "").trim()
+        return cleaned.takeIf { it.isNotEmpty() }
     }
 
 }
