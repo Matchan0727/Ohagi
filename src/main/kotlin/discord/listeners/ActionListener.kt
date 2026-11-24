@@ -7,7 +7,6 @@ import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
 import kotlinx.coroutines.launch
 import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
-import net.dv8tion.jda.api.interactions.InteractionContextType
 import java.awt.Color
 
 class ActionListener : ListenerAdapter() {
@@ -41,9 +40,7 @@ class ActionListener : ListenerAdapter() {
         event: ButtonInteractionEvent,
         generator: suspend () -> net.dv8tion.jda.api.components.container.Container,
     ) {
-        if (event.context != InteractionContextType.BOT_DM &&
-            !commandPermissionService.isAllowed("calendar", event.guild?.id, event.channel.id)
-        ) {
+        if (!commandPermissionService.isAllowed("calendar", event)) {
             event.replyComponents(
                 simpleTitleAndDescriptionContainer(
                     "利用できません",

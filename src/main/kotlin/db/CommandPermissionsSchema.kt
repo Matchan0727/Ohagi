@@ -1,6 +1,11 @@
 package jp.simplespace.db
 
+import jp.simplespace.discord.OhagiBot
 import kotlinx.serialization.Serializable
+import net.dv8tion.jda.api.entities.channel.ChannelType
+import net.dv8tion.jda.api.entities.channel.concrete.PrivateChannel
+import net.dv8tion.jda.api.interactions.Interaction
+import net.dv8tion.jda.api.interactions.InteractionContextType
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
@@ -76,6 +81,35 @@ class CommandPermissionService(private val database: Database) {
                 true
             }
         }
+    }
+
+    /**
+     * ボットとのDMでは常に許可し、それ以外は許可設定に基づいて判定します。
+     */
+    fun isAllowed(commandName: String, interaction: Interaction): Boolean {
+        if (isBotDm(interaction)) return true
+        val allowed = isAllowed(commandName, interaction.guild?.id, interaction.channel?.id)
+        if (!allowed) {
+            OhagiBot.logger.info(
+                "コマンド実行拒否: command={}, context={}, channelType={}, isDetached={}, guildId={}, channelId={}",
+                commandName,
+                interaction.context,
+                interaction.channelType,
+                interaction.channel?.isDetached,
+                interaction.guild?.id,
+                interaction.channel?.id,
+            )
+        }
+        return allowed
+    }
+
+    private fun isBotDm(interaction: Interaction): Boolean {
+        if (interaction.context == InteractionContextType.BOT_DM) return true
+        val channel = interaction.channel ?: return false
+        if (channel.type != ChannelType.PRIVATE) return false
+        if (!channel.isDetached) return true
+        if ((channel as? PrivateChannel)?.user?.id == interaction.user.id) return true
+        return interaction.jda.getPrivateChannelById(channel.id) != null
     }
 
     /**

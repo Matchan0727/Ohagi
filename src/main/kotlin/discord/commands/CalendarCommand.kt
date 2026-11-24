@@ -18,9 +18,7 @@ class CalendarCommand : SlashCommand() {
     }
 
     override fun execute(event: SlashCommandEvent) {
-        if (event.context != InteractionContextType.BOT_DM &&
-            !commandPermissionService.isAllowed(name, event.guild?.id, event.channel.id)
-        ) {
+        if (!commandPermissionService.isAllowed(name, event)) {
             event.replyComponents(
                 simpleTitleAndDescriptionContainer(
                     "利用できません",
