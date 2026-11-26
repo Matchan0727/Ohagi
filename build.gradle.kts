@@ -54,6 +54,7 @@ dependencies {
     implementation("com.google.api-client:google-api-client:2.0.0")
     implementation("com.google.oauth-client:google-oauth-client-jetty:1.34.1")
     implementation("com.google.apis:google-api-services-calendar:v3-rev20220715-2.0.0")
+    implementation("com.google.genai:google-genai:1.68.0")
     testImplementation("io.ktor:ktor-server-test-host")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.4.21")
     // その他

@@ -16,13 +16,26 @@ import dev.minn.jda.ktx.jdabuilder.default
 import dev.minn.jda.ktx.jdabuilder.intents
 import io.ktor.server.application.*
 import io.ktor.server.config.*
+import jp.simplespace.ai.AiModerationClient
+import jp.simplespace.ai.GeminiClientSettings
+import jp.simplespace.ai.GeminiModerationClient
 import jp.simplespace.discord.commands.HelpCommand
 import jp.simplespace.discord.commands.audio.ByeCommand
 import jp.simplespace.discord.commands.audio.JoinCommand
 import jp.simplespace.discord.commands.audio.RvcCommand
 import jp.simplespace.discord.commands.audio.SetSpeakerCommand
+import jp.simplespace.discord.commands.watch.TicketCommand
+import jp.simplespace.discord.commands.watch.VoteBanCommand
+import jp.simplespace.discord.commands.watch.WatchCommand
 import jp.simplespace.discord.listeners.ActionListener
+import jp.simplespace.discord.listeners.WatchEventListener
+import jp.simplespace.discord.listeners.WatchInteractionListener
 import jp.simplespace.audio.RvcApiClient
+import jp.simplespace.watch.BanTicketService
+import jp.simplespace.watch.MessageBatchBuffer
+import jp.simplespace.watch.PendingBanManager
+import jp.simplespace.watch.ScoreDecayScheduler
+import jp.simplespace.watch.VoteBanService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -51,6 +64,8 @@ object OhagiBot {
     lateinit var discordConfig: ApplicationConfig
     lateinit var commandClient: CommandClient
     lateinit var rvcApiClient: RvcApiClient
+    var aiModerationClient: AiModerationClient? = null
+    lateinit var messageBatchBuffer: MessageBatchBuffer
     val eventWaiter: EventWaiter = EventWaiter()
     val logger: Logger = LoggerFactory.getLogger(OhagiBot::class.java)
     val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -77,6 +92,13 @@ object OhagiBot {
         this.discordConfig = config.config("discord")
         setupAudioPlayerManager()
         rvcApiClient = setupRvcApiClient()
+        aiModerationClient = GeminiModerationClient(GeminiClientSettings.fromApplicationConfig(config))
+        messageBatchBuffer = MessageBatchBuffer(
+            aiClientProvider = { aiModerationClient },
+            onTicketSuggested = { guild, target, victimId, reason, scoreEventId, excerpt ->
+                BanTicketService.handleAiTicketSuggestion(guild, target, victimId, reason, scoreEventId, excerpt)
+            },
+        )
         jda = default(discordConfig.property("token").getString(), enableCoroutines = true) {
             intents += GatewayIntent.entries
             setMemberCachePolicy(MemberCachePolicy.ALL)
@@ -84,7 +106,9 @@ object OhagiBot {
             addEventListeners(
                 eventWaiter,
                 setupCommands(),
-                ActionListener()
+                ActionListener(),
+                WatchEventListener(messageBatchBuffer),
+                WatchInteractionListener(),
             )
             setAudioModuleConfig(
                 AudioModuleConfig().withDaveSessionFactory(JDaveSessionFactory())
@@ -99,6 +123,9 @@ object OhagiBot {
 
         jda.listener<ReadyEvent> {
             currentSwitchBotEvent?.let { updateSwitchBotPresence(it) }
+            PendingBanManager.restorePendingBans(jda)
+            VoteBanService.restoreOpenVotes(jda)
+            ScoreDecayScheduler.start(jda)
             logger.info("正常に動作しています。")
         }
 
@@ -120,6 +147,9 @@ object OhagiBot {
                 ByeCommand(),
                 SetSpeakerCommand(),
                 RvcCommand(rvcApiClient),
+                WatchCommand(),
+                VoteBanCommand(),
+                TicketCommand(),
             )
             .build()
         return commandClient

@@ -1,0 +1,42 @@
+package jp.simplespace.discord.listeners
+
+import jp.simplespace.discord.OhagiBot
+import jp.simplespace.watch.MessageBatchBuffer
+import jp.simplespace.watch.PendingBanManager
+import jp.simplespace.watch.RoleRestoreService
+import kotlinx.coroutines.launch
+import net.dv8tion.jda.api.events.guild.member.GuildMemberJoinEvent
+import net.dv8tion.jda.api.events.message.MessageReceivedEvent
+import net.dv8tion.jda.api.hooks.ListenerAdapter
+
+class WatchEventListener(
+    private val messageBatchBuffer: MessageBatchBuffer,
+) : ListenerAdapter() {
+
+    override fun onMessageReceived(event: MessageReceivedEvent) {
+        if (!event.isFromGuild || event.author.isBot) return
+        val message = event.message
+        OhagiBot.scope.launch {
+            try {
+                // 1. 遺言待機中の専用チャンネル発言を最優先で検知
+                val consumedAsLastWords = PendingBanManager.handlePossibleLastWords(message)
+                if (consumedAsLastWords) return@launch
+
+                // 2. 通常のAI違反監視バッチへ投入
+                messageBatchBuffer.onGuildMessage(message)
+            } catch (e: Exception) {
+                OhagiBot.logger.error("WatchEventListener メッセージ処理中にエラー", e)
+            }
+        }
+    }
+
+    override fun onGuildMemberJoin(event: GuildMemberJoinEvent) {
+        OhagiBot.scope.launch {
+            try {
+                RoleRestoreService.handleMemberRejoin(event.guild, event.member)
+            } catch (e: Exception) {
+                OhagiBot.logger.error("再参加時ロール復元処理中にエラー: guild={}, user={}", event.guild.id, event.member.id, e)
+            }
+        }
+    }
+}

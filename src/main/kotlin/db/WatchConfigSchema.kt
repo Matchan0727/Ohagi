@@ -1,0 +1,321 @@
+package jp.simplespace.db
+
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.Table
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.jdbc.Database
+import org.jetbrains.exposed.v1.jdbc.SchemaUtils
+import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.update
+
+enum class AiAutoTicketMode {
+    OFF,
+    APPROVAL,
+    AUTO;
+
+    companion object {
+        fun fromString(value: String?): AiAutoTicketMode =
+            entries.firstOrNull { it.name.equals(value, ignoreCase = true) } ?: APPROVAL
+    }
+}
+
+@Serializable
+data class WatchGuildConfig(
+    val guildId: String,
+    val defaultChannelId: String? = null,
+    val approvalChannelId: String? = null,
+    val managerRoleId: String? = null,
+    val banGraceSeconds: Int = 60,
+    val aiEnabled: Boolean = true,
+    val aiSensitivity: Double = 1.0,
+    val aiMaxDeltaPerEval: Double = 25.0,
+    val aiAutoTicketMode: AiAutoTicketMode = AiAutoTicketMode.APPROVAL,
+    val excludedChannelIds: List<String> = emptyList(),
+    val decayEnabled: Boolean = true,
+    val decayGraceHours: Int = 24,
+    val decayIntervalHours: Int = 6,
+    val decayAmount: Double = 2.0,
+    val decayCalmBonusMultiplier: Double = 1.5,
+    val voteEnabled: Boolean = true,
+    val voteDurationMinutes: Int = 15,
+    val voteMinYesVotes: Int = 3,
+    val votePassRatio: Double = 0.6,
+    val voteCooldownMinutes: Int = 360,
+    val voteUseLastWords: Boolean = true,
+    val ticketUseLastWords: Boolean = true,
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
+@Serializable
+data class WatchTarget(
+    val id: Long,
+    val guildId: String,
+    val userId: String,
+    val dedicatedChannelId: String?,
+    val personaNote: String?,
+    val active: Boolean,
+    val currentCycleId: Long?,
+    val createdBy: String,
+    val createdAt: Long,
+)
+
+class WatchConfigService(private val database: Database) {
+    private val json = Json { ignoreUnknownKeys = true }
+
+    object WatchGuildConfigs : Table("watch_guild_configs") {
+        val guildId = varchar("guild_id", 64)
+        val defaultChannelId = varchar("default_channel_id", 64).nullable()
+        val approvalChannelId = varchar("approval_channel_id", 64).nullable()
+        val managerRoleId = varchar("manager_role_id", 64).nullable()
+        val banGraceSeconds = integer("ban_grace_seconds").default(60)
+        val aiEnabled = bool("ai_enabled").default(true)
+        val aiSensitivity = double("ai_sensitivity").default(1.0)
+        val aiMaxDeltaPerEval = double("ai_max_delta_per_eval").default(25.0)
+        val aiAutoTicketMode = varchar("ai_auto_ticket_mode", 16).default(AiAutoTicketMode.APPROVAL.name)
+        val excludedChannelIdsJson = text("excluded_channel_ids_json").default("[]")
+        val decayEnabled = bool("decay_enabled").default(true)
+        val decayGraceHours = integer("decay_grace_hours").default(24)
+        val decayIntervalHours = integer("decay_interval_hours").default(6)
+        val decayAmount = double("decay_amount").default(2.0)
+        val decayCalmBonusMultiplier = double("decay_calm_bonus_multiplier").default(1.5)
+        val voteEnabled = bool("vote_enabled").default(true)
+        val voteDurationMinutes = integer("vote_duration_minutes").default(15)
+        val voteMinYesVotes = integer("vote_min_yes_votes").default(3)
+        val votePassRatio = double("vote_pass_ratio").default(0.6)
+        val voteCooldownMinutes = integer("vote_cooldown_minutes").default(360)
+        val voteUseLastWords = bool("vote_use_last_words").default(true)
+        val ticketUseLastWords = bool("ticket_use_last_words").default(true)
+        val updatedAt = long("updated_at")
+
+        override val primaryKey = PrimaryKey(guildId)
+    }
+
+    object WatchTargets : Table("watch_targets") {
+        val id = long("id").autoIncrement()
+        val guildId = varchar("guild_id", 64)
+        val userId = varchar("user_id", 64)
+        val dedicatedChannelId = varchar("dedicated_channel_id", 64).nullable()
+        val personaNote = text("persona_note").nullable()
+        val active = bool("active").default(true)
+        val currentCycleId = long("current_cycle_id").nullable()
+        val createdBy = varchar("created_by", 64)
+        val createdAt = long("created_at")
+
+        override val primaryKey = PrimaryKey(id)
+
+        init {
+            uniqueIndex("uq_watch_targets_guild_user", guildId, userId)
+        }
+    }
+
+    init {
+        transaction(database) {
+            SchemaUtils.create(WatchGuildConfigs, WatchTargets)
+        }
+    }
+
+    fun getOrCreateConfig(guildId: String): WatchGuildConfig = transaction(database) {
+        WatchGuildConfigs.selectAll()
+            .where { WatchGuildConfigs.guildId eq guildId }
+            .singleOrNull()
+            ?.toConfig()
+            ?: run {
+                val now = System.currentTimeMillis()
+                WatchGuildConfigs.insert {
+                    it[WatchGuildConfigs.guildId] = guildId
+                    it[WatchGuildConfigs.updatedAt] = now
+                }
+                WatchGuildConfig(guildId = guildId, updatedAt = now)
+            }
+    }
+
+    fun updateConfig(guildId: String, transform: (WatchGuildConfig) -> WatchGuildConfig): WatchGuildConfig {
+        val current = getOrCreateConfig(guildId)
+        val updated = transform(current).copy(guildId = guildId, updatedAt = System.currentTimeMillis())
+        val excludedJson = json.encodeToString(updated.excludedChannelIds.distinct())
+        transaction(database) {
+            WatchGuildConfigs.update({ WatchGuildConfigs.guildId eq guildId }) {
+                it[defaultChannelId] = updated.defaultChannelId
+                it[approvalChannelId] = updated.approvalChannelId
+                it[managerRoleId] = updated.managerRoleId
+                it[banGraceSeconds] = updated.banGraceSeconds
+                it[aiEnabled] = updated.aiEnabled
+                it[aiSensitivity] = updated.aiSensitivity
+                it[aiMaxDeltaPerEval] = updated.aiMaxDeltaPerEval
+                it[aiAutoTicketMode] = updated.aiAutoTicketMode.name
+                it[excludedChannelIdsJson] = excludedJson
+                it[decayEnabled] = updated.decayEnabled
+                it[decayGraceHours] = updated.decayGraceHours
+                it[decayIntervalHours] = updated.decayIntervalHours
+                it[decayAmount] = updated.decayAmount
+                it[decayCalmBonusMultiplier] = updated.decayCalmBonusMultiplier
+                it[voteEnabled] = updated.voteEnabled
+                it[voteDurationMinutes] = updated.voteDurationMinutes
+                it[voteMinYesVotes] = updated.voteMinYesVotes
+                it[votePassRatio] = updated.votePassRatio
+                it[voteCooldownMinutes] = updated.voteCooldownMinutes
+                it[voteUseLastWords] = updated.voteUseLastWords
+                it[ticketUseLastWords] = updated.ticketUseLastWords
+                it[updatedAt] = updated.updatedAt
+            }
+        }
+        return updated
+    }
+
+    fun upsertTarget(
+        guildId: String,
+        userId: String,
+        dedicatedChannelId: String?,
+        personaNote: String?,
+        createdBy: String,
+    ): WatchTarget = transaction(database) {
+        val existing = WatchTargets.selectAll()
+            .where { (WatchTargets.guildId eq guildId) and (WatchTargets.userId eq userId) }
+            .singleOrNull()
+            ?.toTarget()
+
+        if (existing != null) {
+            WatchTargets.update({ WatchTargets.id eq existing.id }) {
+                it[WatchTargets.dedicatedChannelId] = dedicatedChannelId ?: existing.dedicatedChannelId
+                it[WatchTargets.personaNote] = personaNote ?: existing.personaNote
+                it[WatchTargets.active] = true
+            }
+            existing.copy(
+                dedicatedChannelId = dedicatedChannelId ?: existing.dedicatedChannelId,
+                personaNote = personaNote ?: existing.personaNote,
+                active = true,
+            )
+        } else {
+            val now = System.currentTimeMillis()
+            val id = WatchTargets.insert {
+                it[WatchTargets.guildId] = guildId
+                it[WatchTargets.userId] = userId
+                it[WatchTargets.dedicatedChannelId] = dedicatedChannelId
+                it[WatchTargets.personaNote] = personaNote
+                it[WatchTargets.active] = true
+                it[WatchTargets.currentCycleId] = null
+                it[WatchTargets.createdBy] = createdBy
+                it[WatchTargets.createdAt] = now
+            }[WatchTargets.id]
+            WatchTarget(
+                id = id,
+                guildId = guildId,
+                userId = userId,
+                dedicatedChannelId = dedicatedChannelId,
+                personaNote = personaNote,
+                active = true,
+                currentCycleId = null,
+                createdBy = createdBy,
+                createdAt = now,
+            )
+        }
+    }
+
+    fun getTargetById(targetId: Long): WatchTarget? = transaction(database) {
+        WatchTargets.selectAll()
+            .where { WatchTargets.id eq targetId }
+            .singleOrNull()
+            ?.toTarget()
+    }
+
+    fun getTarget(guildId: String, userId: String, activeOnly: Boolean = true): WatchTarget? = transaction(database) {
+        WatchTargets.selectAll()
+            .where {
+                val base = (WatchTargets.guildId eq guildId) and (WatchTargets.userId eq userId)
+                if (activeOnly) base and (WatchTargets.active eq true) else base
+            }
+            .singleOrNull()
+            ?.toTarget()
+    }
+
+    fun listTargets(guildId: String, activeOnly: Boolean = true): List<WatchTarget> = transaction(database) {
+        WatchTargets.selectAll()
+            .where {
+                if (activeOnly) (WatchTargets.guildId eq guildId) and (WatchTargets.active eq true)
+                else WatchTargets.guildId eq guildId
+            }
+            .map { it.toTarget() }
+    }
+
+    fun updateTargetCurrentCycle(targetId: Long, cycleId: Long?) {
+        transaction(database) {
+            WatchTargets.update({ WatchTargets.id eq targetId }) {
+                it[WatchTargets.currentCycleId] = cycleId
+            }
+        }
+    }
+
+    fun updateTargetChannelAndNote(targetId: Long, dedicatedChannelId: String?, personaNote: String?, updateChannel: Boolean, updateNote: Boolean) {
+        transaction(database) {
+            WatchTargets.update({ WatchTargets.id eq targetId }) {
+                if (updateChannel) it[WatchTargets.dedicatedChannelId] = dedicatedChannelId
+                if (updateNote) it[WatchTargets.personaNote] = personaNote
+            }
+        }
+    }
+
+    fun deactivateTarget(targetId: Long) {
+        transaction(database) {
+            WatchTargets.update({ WatchTargets.id eq targetId }) {
+                it[WatchTargets.active] = false
+            }
+        }
+    }
+
+    fun resolveStatusChannelId(target: WatchTarget, config: WatchGuildConfig): String? =
+        target.dedicatedChannelId ?: config.defaultChannelId
+
+    fun isDedicatedChannel(guildId: String, channelId: String): Boolean {
+        val config = getOrCreateConfig(guildId)
+        if (config.defaultChannelId == channelId || config.approvalChannelId == channelId) return true
+        return listTargets(guildId, activeOnly = true).any { it.dedicatedChannelId == channelId }
+    }
+
+    private fun ResultRow.toConfig(): WatchGuildConfig {
+        val excluded = runCatching {
+            json.decodeFromString<List<String>>(this[WatchGuildConfigs.excludedChannelIdsJson])
+        }.getOrDefault(emptyList())
+        return WatchGuildConfig(
+            guildId = this[WatchGuildConfigs.guildId],
+            defaultChannelId = this[WatchGuildConfigs.defaultChannelId],
+            approvalChannelId = this[WatchGuildConfigs.approvalChannelId],
+            managerRoleId = this[WatchGuildConfigs.managerRoleId],
+            banGraceSeconds = this[WatchGuildConfigs.banGraceSeconds],
+            aiEnabled = this[WatchGuildConfigs.aiEnabled],
+            aiSensitivity = this[WatchGuildConfigs.aiSensitivity],
+            aiMaxDeltaPerEval = this[WatchGuildConfigs.aiMaxDeltaPerEval],
+            aiAutoTicketMode = AiAutoTicketMode.fromString(this[WatchGuildConfigs.aiAutoTicketMode]),
+            excludedChannelIds = excluded,
+            decayEnabled = this[WatchGuildConfigs.decayEnabled],
+            decayGraceHours = this[WatchGuildConfigs.decayGraceHours],
+            decayIntervalHours = this[WatchGuildConfigs.decayIntervalHours],
+            decayAmount = this[WatchGuildConfigs.decayAmount],
+            decayCalmBonusMultiplier = this[WatchGuildConfigs.decayCalmBonusMultiplier],
+            voteEnabled = this[WatchGuildConfigs.voteEnabled],
+            voteDurationMinutes = this[WatchGuildConfigs.voteDurationMinutes],
+            voteMinYesVotes = this[WatchGuildConfigs.voteMinYesVotes],
+            votePassRatio = this[WatchGuildConfigs.votePassRatio],
+            voteCooldownMinutes = this[WatchGuildConfigs.voteCooldownMinutes],
+            voteUseLastWords = this[WatchGuildConfigs.voteUseLastWords],
+            ticketUseLastWords = this[WatchGuildConfigs.ticketUseLastWords],
+            updatedAt = this[WatchGuildConfigs.updatedAt],
+        )
+    }
+
+    private fun ResultRow.toTarget(): WatchTarget = WatchTarget(
+        id = this[WatchTargets.id],
+        guildId = this[WatchTargets.guildId],
+        userId = this[WatchTargets.userId],
+        dedicatedChannelId = this[WatchTargets.dedicatedChannelId],
+        personaNote = this[WatchTargets.personaNote],
+        active = this[WatchTargets.active],
+        currentCycleId = this[WatchTargets.currentCycleId],
+        createdBy = this[WatchTargets.createdBy],
+        createdAt = this[WatchTargets.createdAt],
+    )
+}
