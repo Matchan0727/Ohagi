@@ -317,7 +317,7 @@ class WatchInteractionListener : ListenerAdapter() {
                     val sign = if (ev.delta >= 0) "+" else ""
                     val deltaStr = String.format(Locale.US, "%s%.1f%%", sign, ev.delta)
                     val scoreStr = String.format(Locale.US, "%.1f%%", ev.scoreAfter)
-                    append("- **#${ev.id}** `<t:${ev.createdAt / 1000L}:g>` **[${ev.eventType.displayName}]** `$deltaStr` → **$scoreStr**")
+                    append("- **#${ev.id}** <t:${ev.createdAt / 1000L}:f> **[${ev.eventType.displayName}]** `$deltaStr` → **$scoreStr**")
                     if (!ev.reason.isNullOrBlank()) {
                         append("\n  理由: ${ev.reason.take(100)}")
                     }
