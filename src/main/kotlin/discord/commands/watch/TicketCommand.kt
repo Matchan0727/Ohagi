@@ -67,12 +67,13 @@ private class TicketListSub : SlashCommand() {
         }
 
         val body = buildString {
-            append(if (showAll) "## 🎟️ サーバー内の有効な処刑チケット一覧\n" else "## 🎟️ あなたが保有する処刑チケット\n")
+            append(if (showAll) "## 🎟️ サーバー内の有効な処刑チケット一覧\n" else "## 🎟️ あなたが保有する個人処刑チケット\n")
             tickets.take(10).forEach { t ->
                 val target = watchConfigService.getTargetById(t.targetId)
                 val exp = t.expiresAt?.let { "期限: <t:${it / 1000L}:R>" } ?: "無期限"
+                val holderLabel = if (t.isGlobal) "🌐 全体共有" else "<@${t.holderUserId}>"
                 append("- **#${t.id}** 対象: <@${target?.userId ?: "不明"}>")
-                if (showAll) append(" | 保有者: <@${t.holderUserId}>")
+                if (showAll) append(" | 保有者: $holderLabel")
                 append(" | $exp\n  理由: ${t.reason.take(100)}\n")
             }
         }.trim()
@@ -113,17 +114,22 @@ private class TicketUseSub : SlashCommand() {
         guild!!
         val ticketId = event.getOption("ticket_id")?.asLong ?: return
         val ticket = watchVoteTicketService.getTicketById(ticketId)
-        if (ticket == null || ticket.guildId != guild.id || ticket.holderUserId != event.user.id) {
+        val target = ticket?.let { watchConfigService.getTargetById(it.targetId) }
+        val allowed = ticket != null && ticket.guildId == guild.id && (
+            (ticket.isGlobal && target?.userId != event.user.id) ||
+                (!ticket.isGlobal && ticket.holderUserId == event.user.id)
+            )
+        if (!allowed || ticket == null) {
             event.replyComponents(
-                simpleTitleAndDescriptionContainer("エラー", "あなたが保有する有効なチケット `#${ticketId}` が見つかりません。", Color.RED)
+                simpleTitleAndDescriptionContainer("エラー", "あなたが行使できる有効なチケット `#${ticketId}` が見つかりません。", Color.RED)
             ).useComponentsV2().setEphemeral(true).queue()
             return
         }
-        val target = watchConfigService.getTargetById(ticket.targetId)
+        val label = if (ticket.isGlobal) "🌐 全体チケット" else "🎟️ 個人チケット"
         val container = Container.of(
             TextDisplay.of(
-                "## ⚠️ 処刑チケット行使の最終確認\n" +
-                    "本当に <@${target?.userId ?: "不明"}> に対して **処刑チケット (`#${ticket.id}`)** を行使しますか？\n" +
+                "## ⚠️ ${label}行使の最終確認\n" +
+                    "本当に <@${target?.userId ?: "不明"}> に対して **${label} (`#${ticket.id}`)** を行使しますか？\n" +
                     "**発行理由**: ${ticket.reason}\n" +
                     "確定すると対象メンバーへの **BAN手続きが開始** され、チケットは消費されます。"
             ),
@@ -141,11 +147,11 @@ private class TicketUseSub : SlashCommand() {
 private class TicketIssueSub : SlashCommand() {
     init {
         name = "issue"
-        help = "被害者メンバーへ処刑チケットを発行します（管理者用）。"
+        help = "個人チケット（被害者指定）または全体チケット（holder省略）を発行します（管理者用）。"
         options = listOf(
-            OptionData(OptionType.USER, "holder", "チケットを付与する被害者メンバー", true),
             OptionData(OptionType.USER, "target", "BAN対象の監視メンバー", true),
             OptionData(OptionType.STRING, "reason", "チケット発行理由", true),
+            OptionData(OptionType.USER, "holder", "付与する被害者メンバー（省略すると全体チケットとして発行）", false),
             OptionData(OptionType.INTEGER, "expires_days", "有効期限（日数・省略で無期限）", false),
         )
     }
@@ -156,12 +162,12 @@ private class TicketIssueSub : SlashCommand() {
         guild!!
         if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
 
-        val holder = event.getOption("holder")?.asUser ?: return
         val targetUser = event.getOption("target")?.asUser ?: return
         val reason = event.optString("reason")?.trim()?.takeIf { it.isNotEmpty() } ?: "管理者による発行"
+        val holder = event.getOption("holder")?.asUser
         val expiresDays = event.getOption("expires_days")?.asInt
 
-        if (holder.id == targetUser.id) {
+        if (holder != null && holder.id == targetUser.id) {
             event.replyComponents(
                 simpleTitleAndDescriptionContainer("入力エラー", "監視対象者本人に自分用の処刑チケットは発行できません。", Color.RED)
             ).useComponentsV2().setEphemeral(true).queue()
@@ -179,15 +185,20 @@ private class TicketIssueSub : SlashCommand() {
         val ticket = BanTicketService.issueManualTicket(
             guild = guild,
             target = target,
-            holderUserId = holder.id,
+            holderUserId = holder?.id,
             issuedByUserId = event.user.id,
             reason = reason,
             expiresDays = expiresDays,
         )
+        val kindDesc = if (ticket.isGlobal) {
+            "🌐 **全体チケット (`#${ticket.id}`)** を発行しました（対象者以外の全メンバーが使用可能）。"
+        } else {
+            "🎟️ **個人チケット (`#${ticket.id}`)** を <@${holder!!.id}> へ発行しました。"
+        }
         event.replyComponents(
             simpleTitleAndDescriptionContainer(
                 "🎟️ 処刑チケットを発行しました",
-                "チケット **`#${ticket.id}`** を <@${holder.id}> へ発行しました。\n- **対象**: <@${targetUser.id}>\n- **理由**: $reason",
+                "$kindDesc\n- **対象**: <@${targetUser.id}>\n- **理由**: $reason",
                 Color(0x2E, 0xCC, 0x71),
             )
         ).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
@@ -225,6 +236,9 @@ private class TicketRevokeSub : SlashCommand() {
         }
 
         watchVoteTicketService.revokeTicket(ticketId)
+        if (target != null) {
+            BanTicketService.refreshTargetStatusBoard(guild, target)
+        }
         event.replyComponents(
             simpleTitleAndDescriptionContainer("チケットを取り消しました", "処刑チケット `#${ticketId}` を無効化しました。", Color.ORANGE)
         ).useComponentsV2().setEphemeral(true).queue()

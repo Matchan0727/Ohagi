@@ -5,6 +5,7 @@ import com.google.genai.types.Content
 import com.google.genai.types.GenerateContentConfig
 import com.google.genai.types.Part
 import com.google.genai.types.Schema
+import com.google.genai.types.ThinkingConfig
 import com.google.genai.types.Type
 import io.ktor.server.config.ApplicationConfig
 import jp.simplespace.discord.OhagiBot
@@ -18,9 +19,17 @@ data class GeminiClientSettings(
     val googleApiKey: String? = null,
     val gcpProjectId: String? = null,
     val gcpLocation: String? = null,
+    val thinkingLevel: String = DEFAULT_EVAL_THINKING_LEVEL,
+    val appealThinkingLevel: String = DEFAULT_APPEAL_THINKING_LEVEL,
+    val maxOutputTokens: Int = DEFAULT_EVAL_MAX_OUTPUT_TOKENS,
+    val appealMaxOutputTokens: Int = DEFAULT_APPEAL_MAX_OUTPUT_TOKENS,
 ) {
     companion object {
         const val DEFAULT_MODEL = "gemini-4-hydrogen"
+        const val DEFAULT_EVAL_THINKING_LEVEL = "LOW"
+        const val DEFAULT_APPEAL_THINKING_LEVEL = "MEDIUM"
+        const val DEFAULT_EVAL_MAX_OUTPUT_TOKENS = 768
+        const val DEFAULT_APPEAL_MAX_OUTPUT_TOKENS = 1536
 
         fun fromApplicationConfig(appConfig: ApplicationConfig): GeminiClientSettings {
             val aiSection = runCatching { appConfig.config("ai") }.getOrNull()
@@ -41,6 +50,12 @@ data class GeminiClientSettings(
             val location = prop("gcp_location", "GCP_LOCATION")
                 ?: System.getenv("GOOGLE_CLOUD_LOCATION")?.trim()?.takeIf { it.isNotEmpty() }
                 ?: "global"
+            val thinkingLevel = (prop("thinking_level", "AI_THINKING_LEVEL") ?: DEFAULT_EVAL_THINKING_LEVEL).uppercase()
+            val appealThinkingLevel = (prop("appeal_thinking_level", "AI_APPEAL_THINKING_LEVEL") ?: DEFAULT_APPEAL_THINKING_LEVEL).uppercase()
+            val maxOutputTokens = prop("max_output_tokens", "AI_MAX_OUTPUT_TOKENS")?.toIntOrNull()?.coerceIn(128, 8192)
+                ?: DEFAULT_EVAL_MAX_OUTPUT_TOKENS
+            val appealMaxOutputTokens = prop("appeal_max_output_tokens", "AI_APPEAL_MAX_OUTPUT_TOKENS")?.toIntOrNull()?.coerceIn(256, 8192)
+                ?: DEFAULT_APPEAL_MAX_OUTPUT_TOKENS
 
             return GeminiClientSettings(
                 provider = provider.lowercase(),
@@ -48,6 +63,10 @@ data class GeminiClientSettings(
                 googleApiKey = apiKey,
                 gcpProjectId = projectId,
                 gcpLocation = location,
+                thinkingLevel = thinkingLevel,
+                appealThinkingLevel = appealThinkingLevel,
+                maxOutputTokens = maxOutputTokens,
+                appealMaxOutputTokens = appealMaxOutputTokens,
             )
         }
     }
@@ -124,16 +143,8 @@ class GeminiModerationClient(
 
     override suspend fun evaluate(request: ModerationEvaluationRequest): Pair<ModerationEvaluationResult, String>? {
         val activeClient = client ?: return null
-        val systemInstruction = Content.fromParts(Part.fromText(ModerationPromptBuilder.buildSystemInstruction()))
         val userContent = buildUserContent(request)
-
-        val config = GenerateContentConfig.builder()
-            .systemInstruction(systemInstruction)
-            .responseMimeType("application/json")
-            .responseSchema(responseSchema)
-            .temperature(0.2f)
-            .candidateCount(1)
-            .build()
+        val config = buildEvaluationConfig()
 
         return withContext(Dispatchers.IO) {
             runCatching {
@@ -149,6 +160,42 @@ class GeminiModerationClient(
                 OhagiBot.logger.error("Gemini API 違反判定呼び出しに失敗しました (model={})", settings.model, it)
             }.getOrNull()
         }
+    }
+
+    internal fun buildEvaluationConfig(): GenerateContentConfig {
+        val systemInstruction = Content.fromParts(Part.fromText(ModerationPromptBuilder.buildSystemInstruction()))
+        return GenerateContentConfig.builder()
+            .systemInstruction(systemInstruction)
+            .responseMimeType("application/json")
+            .responseSchema(responseSchema)
+            .thinkingConfig(
+                ThinkingConfig.builder()
+                    .thinkingLevel(settings.thinkingLevel)
+                    .includeThoughts(false)
+                    .build()
+            )
+            .maxOutputTokens(settings.maxOutputTokens)
+            .temperature(0.2f)
+            .candidateCount(1)
+            .build()
+    }
+
+    internal fun buildAppealConfig(): GenerateContentConfig {
+        val systemInstruction = Content.fromParts(Part.fromText(ModerationPromptBuilder.buildAppealSystemInstruction()))
+        return GenerateContentConfig.builder()
+            .systemInstruction(systemInstruction)
+            .responseMimeType("application/json")
+            .responseSchema(appealResponseSchema)
+            .thinkingConfig(
+                ThinkingConfig.builder()
+                    .thinkingLevel(settings.appealThinkingLevel)
+                    .includeThoughts(false)
+                    .build()
+            )
+            .maxOutputTokens(settings.appealMaxOutputTokens)
+            .temperature(0.2f)
+            .candidateCount(1)
+            .build()
     }
 
     internal fun buildUserContent(request: ModerationEvaluationRequest): Content {
@@ -174,16 +221,8 @@ class GeminiModerationClient(
 
     override suspend fun reviewAppeal(request: AppealReviewRequest): Pair<AppealReviewResult, String>? {
         val activeClient = client ?: return null
-        val systemInstruction = Content.fromParts(Part.fromText(ModerationPromptBuilder.buildAppealSystemInstruction()))
         val userPrompt = ModerationPromptBuilder.buildAppealUserPrompt(request)
-
-        val config = GenerateContentConfig.builder()
-            .systemInstruction(systemInstruction)
-            .responseMimeType("application/json")
-            .responseSchema(appealResponseSchema)
-            .temperature(0.2f)
-            .candidateCount(1)
-            .build()
+        val config = buildAppealConfig()
 
         return withContext(Dispatchers.IO) {
             runCatching {

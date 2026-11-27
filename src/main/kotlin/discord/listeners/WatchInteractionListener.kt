@@ -58,6 +58,8 @@ class WatchInteractionListener : ListenerAdapter() {
             id.startsWith("voteban_no:") -> handleVoteBallot(event, guild, id.substringAfter("voteban_no:").toLongOrNull(), VoteChoice.NO)
             id.startsWith("ticket_approve:") -> handleTicketApproval(event, guild, id.substringAfter("ticket_approve:").toLongOrNull(), approve = true)
             id.startsWith("ticket_reject:") -> handleTicketApproval(event, guild, id.substringAfter("ticket_reject:").toLongOrNull(), approve = false)
+            id.startsWith("ticket_board_global:") -> handleBoardGlobalTicket(event, guild, id.substringAfter("ticket_board_global:").toLongOrNull())
+            id.startsWith("ticket_board_personal:") -> handleBoardPersonalTicket(event, guild, id.substringAfter("ticket_board_personal:").toLongOrNull())
             id.startsWith("ticket_use_confirm:") -> handleTicketUseConfirm(event, guild, id.substringAfter("ticket_use_confirm:").toLongOrNull())
             id.startsWith("ticket_use_exec:") -> handleTicketUseExec(event, guild, id.substringAfter("ticket_use_exec:").toLongOrNull())
             id.startsWith("ticket_use_cancel:") -> {
@@ -238,6 +240,122 @@ class WatchInteractionListener : ListenerAdapter() {
         }
     }
 
+    private fun handleBoardGlobalTicket(
+        event: ButtonInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+        targetId: Long?,
+    ) {
+        if (targetId == null) return
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "監視対象が見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        if (event.user.id == target.userId) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("使用できません", "監視対象者本人は全体チケットを使用できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val globalTickets = watchVoteTicketService.listActiveGlobalTicketsForTarget(guild.id, target.id)
+        if (globalTickets.isEmpty()) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("全体チケットなし", "<@${target.userId}> に対する有効な全体チケットは現在 0 枚です。", Color.GRAY)
+            ).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val ticket = globalTickets.first()
+        val container = Container.of(
+            TextDisplay.of(
+                "## ⚠️ 全体チケット行使の最終確認\n" +
+                    "本当に <@${target.userId}> に対して **🌐 全体チケット (`#${ticket.id}`)** を 1 枚消費して行使しますか？\n" +
+                    "- **残り枚数**: 現在 **${globalTickets.size}枚**（行使後: ${globalTickets.size - 1}枚）\n" +
+                    "- **発行理由**: ${ticket.reason}\n\n" +
+                    "確定すると対象メンバーへの **BAN手続きが即座に開始** されます。"
+            ),
+            Separator.createInvisible(Separator.Spacing.SMALL),
+            ActionRow.of(
+                Button.danger("ticket_use_exec:${ticket.id}", "💀 執行する（確定）"),
+                Button.secondary("ticket_use_cancel:${ticket.id}", "キャンセル"),
+            ),
+        ).withAccentColor(Color(0xE7, 0x4C, 0x3C))
+
+        event.replyComponents(container).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
+    }
+
+    private fun handleBoardPersonalTicket(
+        event: ButtonInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+        targetId: Long?,
+    ) {
+        if (targetId == null) return
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "監視対象が見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val personalTickets = watchVoteTicketService.listActivePersonalTicketsForHolderAndTarget(
+            guildId = guild.id,
+            holderUserId = event.user.id,
+            targetId = target.id,
+        )
+        if (personalTickets.isEmpty()) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer(
+                    "個人チケットなし",
+                    "あなたは現在 <@${target.userId}> に対する有効な **個人チケット** を保有していません。",
+                    Color.GRAY,
+                )
+            ).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        if (personalTickets.size == 1) {
+            val ticket = personalTickets.first()
+            val container = Container.of(
+                TextDisplay.of(
+                    "## ⚠️ 個人チケット行使の最終確認\n" +
+                        "本当に <@${target.userId}> に対して **🎟️ 個人チケット (`#${ticket.id}`)** を行使しますか？\n" +
+                        "- **発行理由**: ${ticket.reason}\n\n" +
+                        "確定すると対象メンバーへの **BAN手続きが即座に開始** され、このチケットは消費されます。"
+                ),
+                Separator.createInvisible(Separator.Spacing.SMALL),
+                ActionRow.of(
+                    Button.danger("ticket_use_exec:${ticket.id}", "💀 執行する（確定）"),
+                    Button.secondary("ticket_use_cancel:${ticket.id}", "キャンセル"),
+                ),
+            ).withAccentColor(Color(0xE7, 0x4C, 0x3C))
+            event.replyComponents(container).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val body = buildString {
+            append("## 🎟️ あなたが保有する個人チケット（対象: <@${target.userId}>）\n")
+            append("行使したいチケットを選んでください（次画面で最終確認が出ます）。\n\n")
+            personalTickets.take(5).forEach { t ->
+                val exp = t.expiresAt?.let { "期限: <t:${it / 1000L}:R>" } ?: "無期限"
+                append("- **#${t.id}** ($exp) — ${t.reason.take(80)}\n")
+            }
+        }.trim()
+
+        val buttons = personalTickets.take(5).map { t ->
+            Button.danger("ticket_use_confirm:${t.id}", "⚔️ #${t.id} を行使")
+        }
+        val container = Container.of(
+            TextDisplay.of(body),
+            Separator.createInvisible(Separator.Spacing.SMALL),
+            ActionRow.of(buttons),
+        ).withAccentColor(Color(0xE6, 0x7E, 0x22))
+        event.replyComponents(container).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
+    }
+
     private fun handleTicketUseConfirm(
         event: ButtonInteractionEvent,
         guild: net.dv8tion.jda.api.entities.Guild,
@@ -246,18 +364,23 @@ class WatchInteractionListener : ListenerAdapter() {
         if (ticketId == null) return
         if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
         val ticket = watchVoteTicketService.getTicketById(ticketId)
-        if (ticket == null || ticket.holderUserId != event.user.id) {
+        val target = ticket?.let { watchConfigService.getTargetById(it.targetId) }
+        val allowed = ticket != null && (
+            (ticket.isGlobal && target?.userId != event.user.id) ||
+                (!ticket.isGlobal && ticket.holderUserId == event.user.id)
+            )
+        if (!allowed || ticket == null) {
             event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "使用可能なチケットが見つかりません。", Color.RED))
                 .useComponentsV2().setEphemeral(true).queue()
             return
         }
-        val target = watchConfigService.getTargetById(ticket.targetId)
         val targetMention = target?.let { "<@${it.userId}>" } ?: "対象不明"
+        val label = if (ticket.isGlobal) "🌐 全体チケット" else "🎟️ 個人チケット"
 
         val container = Container.of(
             TextDisplay.of(
-                "## ⚠️ 処刑チケット行使の最終確認\n" +
-                    "本当に $targetMention に対して **処刑チケット (`#${ticket.id}`)** を行使しますか？\n" +
+                "## ⚠️ ${label}行使の最終確認\n" +
+                    "本当に $targetMention に対して **${label} (`#${ticket.id}`)** を行使しますか？\n" +
                     "実行すると対象メンバーへの **BAN手続きが即座に開始** され、このチケットは消費されます。"
             ),
             Separator.createInvisible(Separator.Spacing.SMALL),

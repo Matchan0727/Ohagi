@@ -99,9 +99,15 @@ data class WatchBanTicket(
     val usedCycleId: Long?,
     val createdAt: Long,
     val usedAt: Long?,
-)
+) {
+    val isGlobal: Boolean
+        get() = holderUserId == WatchVoteTicketService.GLOBAL_HOLDER_ID
+}
 
 class WatchVoteTicketService(private val database: Database) {
+    companion object {
+        const val GLOBAL_HOLDER_ID = "ALL"
+    }
     object WatchVotes : Table("watch_votes") {
         val id = long("id").autoIncrement()
         val guildId = varchar("guild_id", 64).index("idx_watch_votes_guild")
@@ -346,6 +352,39 @@ class WatchVoteTicketService(private val database: Database) {
             .map { expireIfNeeded(it.toTicket()) }
             .filter { it.status == TicketStatus.ACTIVE }
     }
+
+    fun listActiveGlobalTicketsForTarget(guildId: String, targetId: Long): List<WatchBanTicket> = transaction(database) {
+        WatchBanTickets.selectAll()
+            .where {
+                (WatchBanTickets.guildId eq guildId) and
+                    (WatchBanTickets.targetId eq targetId) and
+                    (WatchBanTickets.holderUserId eq GLOBAL_HOLDER_ID) and
+                    (WatchBanTickets.status eq TicketStatus.ACTIVE.name)
+            }
+            .orderBy(WatchBanTickets.createdAt, SortOrder.ASC)
+            .map { expireIfNeeded(it.toTicket()) }
+            .filter { it.status == TicketStatus.ACTIVE }
+    }
+
+    fun listActivePersonalTicketsForHolderAndTarget(
+        guildId: String,
+        holderUserId: String,
+        targetId: Long,
+    ): List<WatchBanTicket> = transaction(database) {
+        WatchBanTickets.selectAll()
+            .where {
+                (WatchBanTickets.guildId eq guildId) and
+                    (WatchBanTickets.targetId eq targetId) and
+                    (WatchBanTickets.holderUserId eq holderUserId) and
+                    (WatchBanTickets.status eq TicketStatus.ACTIVE.name)
+            }
+            .orderBy(WatchBanTickets.createdAt, SortOrder.DESC)
+            .map { expireIfNeeded(it.toTicket()) }
+            .filter { it.status == TicketStatus.ACTIVE }
+    }
+
+    fun countActiveGlobalTicketsForTarget(guildId: String, targetId: Long): Int =
+        listActiveGlobalTicketsForTarget(guildId, targetId).size
 
     fun approveTicket(ticketId: Long, approverUserId: String): WatchBanTicket? = transaction(database) {
         WatchBanTickets.update({

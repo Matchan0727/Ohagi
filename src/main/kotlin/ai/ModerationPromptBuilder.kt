@@ -22,8 +22,10 @@ object ModerationPromptBuilder {
 - 特定の他メンバー1名に対して「あまりにもひどい攻撃・暴言・ハラスメント」を行った場合のみ `suggest_ban_ticket: true` とし、会話コンテキスト内に実在する被害者の `author_id` を `victim_user_id` に設定してください。
 - 被害者が特定できない場合や軽度〜中度の違反では必ず `suggest_ban_ticket: false`, `victim_user_id: null` にしてください。
 
-【出力形式】
-必ず指定されたJSONスキーマのみを出力し、理由 (`reason_ja`, `ticket_reason_ja`) は簡潔な日本語で記述してください。
+【出力形式（トークン最適化ルール）】
+- 必ず指定されたJSONスキーマのみを出力してください。
+- `is_violation` が `false`（問題なし）の場合は、`reason_ja` は**必ず空文字 `""`**、`ticket_reason_ja` は `null`、`victim_user_id` は `null` にしてください（不要な説明文を書かないこと）。
+- `is_violation` が `true` の場合のみ、`reason_ja` を**30文字以内**の簡潔な日本語で記述してください。`ticket_reason_ja` も `suggest_ban_ticket: true` の場合のみ40文字以内で記述してください。
 """.trimIndent()
 
     fun buildUserPrompt(request: ModerationEvaluationRequest): String = buildString {

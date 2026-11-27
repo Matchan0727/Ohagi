@@ -11,6 +11,7 @@ import jp.simplespace.watch.render.HistoryGraphRenderer
 import jp.simplespace.watch.render.ProgressBarRenderer
 import jp.simplespace.watchConfigService
 import jp.simplespace.watchCycleService
+import jp.simplespace.watchVoteTicketService
 import net.dv8tion.jda.api.components.actionrow.ActionRow
 import net.dv8tion.jda.api.components.buttons.Button
 import net.dv8tion.jda.api.components.container.Container
@@ -55,6 +56,7 @@ object StatusBoardService {
         val member = guild.getMemberById(target.userId)
         val displayName = member?.effectiveName ?: guild.jda.getUserById(target.userId)?.effectiveName ?: "User(${target.userId})"
         val banCount = watchCycleService.countBansByTarget(target.id)
+        val globalTicketCount = watchVoteTicketService.countActiveGlobalTicketsForTarget(guild.id, target.id)
         val latestEvent = watchCycleService.getLatestEventForCycle(cycle.id)
         val footer = buildFooterText(cycle, latestEvent, config.decayEnabled, config.decayGraceHours)
 
@@ -66,7 +68,9 @@ object StatusBoardService {
             footerText = footer,
         )
         val fileUpload = FileUpload.fromData(pngBytes, PROGRESS_FILE_NAME)
-        val container = buildStatusContainer(target, cycle, displayName, banCount, latestEvent, config.decayEnabled, config.decayGraceHours, fileUpload)
+        val container = buildStatusContainer(
+            target, cycle, displayName, banCount, globalTicketCount, latestEvent, config.decayEnabled, config.decayGraceHours, fileUpload
+        )
 
         if (!forceNewMessage && !cycle.statusMessageId.isNullOrBlank()) {
             val edited = tryEditExisting(channel, cycle.statusMessageId, container)
@@ -75,7 +79,9 @@ object StatusBoardService {
 
         // 新規投稿（または編集失敗時のフォールバック再投稿）
         val newUpload = FileUpload.fromData(pngBytes, PROGRESS_FILE_NAME)
-        val newContainer = buildStatusContainer(target, cycle, displayName, banCount, latestEvent, config.decayEnabled, config.decayGraceHours, newUpload)
+        val newContainer = buildStatusContainer(
+            target, cycle, displayName, banCount, globalTicketCount, latestEvent, config.decayEnabled, config.decayGraceHours, newUpload
+        )
         return runCatching {
             val sent = channel.sendMessageComponents(newContainer)
                 .setAllowedMentions(emptyList())
@@ -118,6 +124,7 @@ object StatusBoardService {
         cycle: WatchCycle,
         displayName: String,
         banCount: Int,
+        globalTicketCount: Int,
         latestEvent: WatchScoreEvent?,
         decayEnabled: Boolean,
         decayGraceHours: Int,
@@ -137,7 +144,10 @@ object StatusBoardService {
 
         val headerText = buildString {
             append("## 🛡️ 監視ステータス: <@${target.userId}>（第${cycle.cycleNumber}サイクル）\n")
-            append("状態: **$stateLabel** | 現在違反度: **${String.format(Locale.US, "%.1f", cycle.currentScore)}%** | 通算BAN: **${banCount}回**")
+            append(
+                "状態: **$stateLabel** | 現在違反度: **${String.format(Locale.US, "%.1f", cycle.currentScore)}%** | " +
+                    "通算BAN: **${banCount}回** | 🌐 全体チケット: **${globalTicketCount}枚**"
+            )
         }
 
         val detailText = buildString {
@@ -178,10 +188,22 @@ object StatusBoardService {
             }
         }
 
-        val buttons = buildList {
-            add(Button.primary("watch_graph:${target.id}:${GraphRange.WEEK_1.key}", "📊 グラフを見る"))
-            add(Button.secondary("watch_logs:${target.id}:0", "📋 違反ログ"))
-        }
+        val isActive = cycle.status == WatchCycleStatus.ACTIVE
+        val globalBtn = Button.danger(
+            "ticket_board_global:${target.id}",
+            "🌐 全体チケット使用 (${globalTicketCount}枚)",
+        ).withDisabled(!isActive || globalTicketCount <= 0)
+        val personalBtn = Button.secondary(
+            "ticket_board_personal:${target.id}",
+            "🎟️ 個人チケット使用",
+        ).withDisabled(!isActive)
+
+        val buttons = listOf(
+            Button.primary("watch_graph:${target.id}:${GraphRange.WEEK_1.key}", "📊 グラフを見る"),
+            Button.secondary("watch_logs:${target.id}:0", "📋 違反ログ"),
+            globalBtn,
+            personalBtn,
+        )
 
         return Container.of(
             TextDisplay.of(headerText),

@@ -7,6 +7,7 @@ import jp.simplespace.db.TicketStatus
 import jp.simplespace.db.WatchBanTicket
 import jp.simplespace.db.WatchCycleStatus
 import jp.simplespace.db.WatchTarget
+import jp.simplespace.db.WatchVoteTicketService
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
 import jp.simplespace.watchConfigService
@@ -25,24 +26,35 @@ object BanTicketService {
     fun issueManualTicket(
         guild: Guild,
         target: WatchTarget,
-        holderUserId: String,
+        holderUserId: String?,
         issuedByUserId: String,
         reason: String,
         expiresDays: Int?,
     ): WatchBanTicket {
+        val resolvedHolder = holderUserId ?: WatchVoteTicketService.GLOBAL_HOLDER_ID
         val expiresAt = expiresDays?.takeIf { it > 0 }?.let { System.currentTimeMillis() + it * 24L * 3600_000L }
         val ticket = watchVoteTicketService.createTicket(
             guildId = guild.id,
             targetId = target.id,
-            holderUserId = holderUserId,
+            holderUserId = resolvedHolder,
             issuedByUserId = issuedByUserId,
             issueSource = TicketIssueSource.MANUAL,
             reason = reason,
             status = TicketStatus.ACTIVE,
             expiresAt = expiresAt,
         )
-        notifyHolderTicketIssued(guild, target, ticket)
+        if (ticket.isGlobal) {
+            notifyGlobalTicketIssued(guild, target, ticket)
+        } else {
+            notifyHolderTicketIssued(guild, target, ticket)
+        }
+        refreshTargetStatusBoard(guild, target)
         return ticket
+    }
+
+    fun refreshTargetStatusBoard(guild: Guild, target: WatchTarget) {
+        val cycle = target.currentCycleId?.let { watchCycleService.getCycleById(it) } ?: return
+        StatusBoardService.upsertStatusBoard(guild, target, cycle, forceNewMessage = false)
     }
 
     suspend fun handleAiTicketSuggestion(
@@ -139,15 +151,20 @@ object BanTicketService {
         if (ticket.guildId != guild.id) {
             return false to "このサーバーのチケットではありません。"
         }
-        if (ticket.holderUserId != actorUserId) {
+        val target = watchConfigService.getTargetById(ticket.targetId)
+            ?: return false to "対象の監視データが見つかりません。"
+
+        if (ticket.isGlobal) {
+            if (actorUserId == target.userId) {
+                return false to "監視対象者本人は全体チケットを行使できません。"
+            }
+        } else if (ticket.holderUserId != actorUserId) {
             return false to "このチケットの保有者本人のみが行使できます。"
         }
         if (ticket.status != TicketStatus.ACTIVE) {
             return false to "このチケットは使用できません（状態: `${ticket.status}`）。"
         }
 
-        val target = watchConfigService.getTargetById(ticket.targetId)
-            ?: return false to "対象の監視データが見つかりません。"
         val cycle = target.currentCycleId?.let { watchCycleService.getCycleById(it) }
         if (cycle == null || cycle.status != WatchCycleStatus.ACTIVE) {
             return false to "対象メンバーは現在アクティブな監視状態ではないため行使できません（すでにBAN済み、または遺言待機中です）。"
@@ -157,13 +174,14 @@ object BanTicketService {
             ?: return false to "チケットはすでに使用されています。"
 
         val config = watchConfigService.getOrCreateConfig(guild.id)
-        val detail = "<@$actorUserId> が処刑チケット #${consumed.id} を行使（理由: ${consumed.reason}）"
+        val ticketLabel = if (consumed.isGlobal) "🌐 全体チケット" else "🎟️ 処刑チケット"
+        val detail = "<@$actorUserId> が${ticketLabel} #${consumed.id} を行使（理由: ${consumed.reason}）"
 
         val channelId = watchConfigService.resolveStatusChannelId(target, config)
         channelId?.let { guild.getTextChannelById(it) }?.sendMessageComponents(
             simpleTitleAndDescriptionContainer(
-                "⚔️ 処刑チケット行使！",
-                "<@$actorUserId> が <@${target.userId}> に対して **処刑チケット (`#${consumed.id}`)** を行使しました！\n**発行理由**: ${consumed.reason}",
+                "⚔️ ${ticketLabel}行使！",
+                "<@$actorUserId> が <@${target.userId}> に対して **${ticketLabel} (`#${consumed.id}`)** を行使しました！\n**発行理由**: ${consumed.reason}",
                 Color(0xE7, 0x4C, 0x3C),
             )
         )?.setAllowedMentions(emptyList())?.useComponentsV2()?.queue()
@@ -177,10 +195,26 @@ object BanTicketService {
             actorUserId = actorUserId,
         )
         return if (triggered) {
-            true to "処刑チケット `#${consumed.id}` を行使しました！<@${target.userId}> への処刑手続きを開始します。"
+            true to "${ticketLabel} `#${consumed.id}` を行使しました！<@${target.userId}> への処刑手続きを開始します。"
         } else {
             false to "処刑手続きの開始に失敗しました（対象の状態が直前に変更された可能性があります）。"
         }
+    }
+
+    private fun notifyGlobalTicketIssued(guild: Guild, target: WatchTarget, ticket: WatchBanTicket) {
+        val config = watchConfigService.getOrCreateConfig(guild.id)
+        val chId = watchConfigService.resolveStatusChannelId(target, config) ?: return
+        val exp = ticket.expiresAt?.let { "\n- **有効期限**: <t:${it / 1000L}:F>" } ?: "\n- **有効期限**: 無期限"
+        val count = watchVoteTicketService.countActiveGlobalTicketsForTarget(guild.id, target.id)
+        guild.getTextChannelById(chId)?.sendMessageComponents(
+            simpleTitleAndDescriptionContainer(
+                "🌐 全体チケットが追加されました！",
+                "<@${target.userId}> に対する **全体チケット (`#${ticket.id}`)** が発行されました（現在残り **${count}枚**）。\n" +
+                    "- **理由**: ${ticket.reason}$exp\n\n" +
+                    "-# 対象者以外のメンバーは誰でもステータスカードの「🌐 全体チケット使用」ボタンから行使できます。",
+                Color(0xE6, 0x7E, 0x22),
+            )
+        )?.setAllowedMentions(emptyList())?.useComponentsV2()?.queue()
     }
 
     private fun notifyHolderTicketIssued(guild: Guild, target: WatchTarget, ticket: WatchBanTicket) {

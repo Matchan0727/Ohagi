@@ -13,14 +13,18 @@ import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.AppealDecision
+import jp.simplespace.db.TicketIssueSource
+import jp.simplespace.db.TicketStatus
 import jp.simplespace.db.WatchAiFeedback
 import jp.simplespace.db.WatchAiRule
+import jp.simplespace.db.WatchBanTicket
 import jp.simplespace.db.WatchCycle
 import jp.simplespace.db.WatchCycleStatus
 import jp.simplespace.db.WatchGuildConfig
 import jp.simplespace.db.WatchScoreEvent
 import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.db.WatchVoteTally
+import jp.simplespace.db.WatchVoteTicketService
 import jp.simplespace.watch.render.ColorGradient
 import jp.simplespace.watch.render.FontLoader
 import jp.simplespace.watch.render.GraphRange
@@ -339,5 +343,37 @@ class WatchSystemTest {
         val w = tracker.recordAndGetWindow("ch1", t0 + 310_000L) // sample 3: 10s
         assertEquals(3, w.sampleCount)
         assertEquals(13_500L, w.debounceMillis)
+    }
+
+    @Test
+    fun testGlobalVsPersonalBanTicket() {
+        val globalTicket = WatchBanTicket(
+            id = 1, guildId = "g1", targetId = 1,
+            holderUserId = WatchVoteTicketService.GLOBAL_HOLDER_ID,
+            issuedByUserId = "admin", issueSource = TicketIssueSource.MANUAL,
+            reason = "共有処刑権", sourceScoreEventId = null,
+            status = TicketStatus.ACTIVE, expiresAt = null, usedCycleId = null,
+            createdAt = 0L, usedAt = null,
+        )
+        val personalTicket = globalTicket.copy(id = 2, holderUserId = "1234567890")
+        assertTrue(globalTicket.isGlobal)
+        assertFalse(personalTicket.isGlobal)
+    }
+
+    @Test
+    fun testThinkingLevelAndOutputTokenLimits() {
+        val client = GeminiModerationClient(GeminiClientSettings(provider = "gemini_api", googleApiKey = null))
+
+        val evalCfg = client.buildEvaluationConfig()
+        assertEquals(GeminiClientSettings.DEFAULT_EVAL_MAX_OUTPUT_TOKENS, evalCfg.maxOutputTokens().orElse(0))
+        assertEquals("LOW", evalCfg.thinkingConfig().get().thinkingLevel().get().toString())
+
+        val appealCfg = client.buildAppealConfig()
+        assertEquals(GeminiClientSettings.DEFAULT_APPEAL_MAX_OUTPUT_TOKENS, appealCfg.maxOutputTokens().orElse(0))
+        assertEquals("MEDIUM", appealCfg.thinkingConfig().get().thinkingLevel().get().toString())
+
+        val sysPrompt = ModerationPromptBuilder.buildSystemInstruction()
+        assertTrue(sysPrompt.contains("空文字"))
+        assertTrue(sysPrompt.contains("30文字以内"))
     }
 }
