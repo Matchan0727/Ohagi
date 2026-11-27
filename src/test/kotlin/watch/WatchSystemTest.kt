@@ -155,7 +155,25 @@ class WatchSystemTest {
                 WatchAiFeedback(1, "g1", 1, 10, "雑魚すぎ草", null, 8.0, 0.0, AiFeedbackVerdict.FALSE_POSITIVE, "身内ネタなのでセーフ", "admin", 0L),
             ),
             contextMessages = listOf(
-                ContextMessage("u_other", "Aさん", false, "また負けたわｗ", 100L),
+                ContextMessage(
+                    authorId = "u_other",
+                    authorName = "Aさん",
+                    isTarget = false,
+                    content = "また負けたわｗ",
+                    timestampEpochSec = 100L,
+                    position = ContextMessage.POSITION_BEFORE,
+                ),
+                ContextMessage(
+                    authorId = "u_other",
+                    authorName = "Aさん",
+                    isTarget = false,
+                    content = "さすがにそれは言い過ぎだろ",
+                    timestampEpochSec = 115L,
+                    position = ContextMessage.POSITION_DURING_OR_AFTER,
+                    replyToAuthorName = "T氏",
+                    replyToExcerpt = "お前本当に使えないな",
+                    reactionsSummary = "😡x2",
+                ),
             ),
             targetMessages = listOf("お前本当に使えないな"),
         )
@@ -165,6 +183,9 @@ class WatchSystemTest {
         assertTrue(prompt.contains("雑魚すぎ草"))
         assertTrue(prompt.contains("author_id=u_other"))
         assertTrue(prompt.contains("お前本当に使えないな"))
+        assertTrue(prompt.contains("発言の間〜直後の他メンバーの反応"))
+        assertTrue(prompt.contains("[返信先: T氏「お前本当に使えないな」]"))
+        assertTrue(prompt.contains("[リアクション: 😡x2]"))
     }
 
     @Test
@@ -392,5 +413,72 @@ class WatchSystemTest {
         val modal = jp.simplespace.discord.commands.watch.WatchAiRuleUi.buildEditModal(rule)
         assertEquals("watch_rule_edit_modal:7", modal.id)
         assertEquals(3, modal.components.size)
+    }
+
+    @Test
+    fun testSpamDetectorCatchesFloodDuplicatesMentionsAndWalls() {
+        val detector = SpamDetector()
+        val base = 2_000_000L
+
+        // 1. 単発の短文はスパムではない
+        val (obs1, r1) = detector.observe("g1", "c1", "u1", "m1", "あ", "あ", 0, false, base)
+        assertFalse(r1.isSuspicious)
+        detector.rememberSkipped("g1", "c1", "u1", obs1)
+
+        val (obs2, r2) = detector.observe("g1", "c1", "u1", "m2", "あ", "あ", 0, false, base + 2_000L)
+        assertFalse(r2.isSuspicious)
+        detector.rememberSkipped("g1", "c1", "u1", obs2)
+
+        // 3回目で同一文言連投を検知し、スキップしていた過去2件も回収される
+        val (_, r3) = detector.observe("g1", "c1", "u1", "m3", "あ", "あ", 0, false, base + 4_000L)
+        assertTrue(r3.isSuspicious)
+        assertEquals(2, r3.recentSkippedSummaries.size)
+        assertTrue(r3.toPromptSummary()!!.contains("繰り返し"))
+
+        // 2. メンション爆撃
+        val (_, mentionRes) = detector.observe("g1", "c2", "u2", "m10", "@a @b @c @d @e", "@a @b @c @d @e", 5, false, base)
+        assertTrue(mentionRes.isSuspicious)
+        assertTrue(mentionRes.isSevereFlood)
+
+        // 3. 大量改行 & 同一文字連打
+        val wallText = (1..25).joinToString("\n") { "x" }
+        val (_, wallRes) = detector.observe("g1", "c3", "u3", "m20", wallText, wallText, 0, false, base)
+        assertTrue(wallRes.isSuspicious)
+        assertTrue(wallRes.toPromptSummary()!!.contains("改行"))
+
+        val repeatText = "あ".repeat(30)
+        val (_, repeatRes) = detector.observe("g1", "c4", "u4", "m30", repeatText, repeatText, 0, false, base)
+        assertTrue(repeatRes.isSuspicious)
+        assertTrue(repeatRes.toPromptSummary()!!.contains("連打"))
+
+        // 4. 10秒以内の6連投フラッド
+        var lastBurstRes = r1
+        for (i in 1..6) {
+            lastBurstRes = detector.observe("g1", "c5", "u5", "mb$i", "発言$i", "発言$i", 0, false, base + i * 1_000L).second
+        }
+        assertTrue(lastBurstRes.isSuspicious)
+        assertTrue(lastBurstRes.toPromptSummary()!!.contains("高速連投"))
+    }
+
+    @Test
+    fun testUrlImageExtractionAndSsrfGuard() {
+        val urls = UrlImageFetcher.extractDirectImageUrls(
+            "これ見て https://example.com/a.png と https://pbs.twimg.com/media/xyz?format=jpg&name=large あと https://example.com/article"
+        )
+        assertEquals(2, urls.size)
+        assertTrue(urls.any { it.contains("a.png") })
+        assertTrue(urls.any { it.contains("pbs.twimg.com") })
+
+        // SSRF 防止チェック: プライベート/ループバック/メタデータIPはすべて拒否
+        assertFalse(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("127.0.0.1")))
+        assertFalse(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("10.0.0.5")))
+        assertFalse(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("192.168.1.10")))
+        assertFalse(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("169.254.169.254")))
+        assertFalse(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("100.64.0.1")))
+        assertFalse(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("::1")))
+        assertFalse(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("fc00::1")))
+
+        // パブリックIPは許可
+        assertTrue(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("8.8.8.8")))
     }
 }

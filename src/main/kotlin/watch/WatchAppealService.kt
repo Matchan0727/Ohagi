@@ -239,18 +239,23 @@ object WatchAppealService {
         targetUserId: String,
     ): List<ContextMessage> {
         return runCatching {
-            channel.getHistoryBefore(beforeMessageId, 6)
+            channel.getHistoryBefore(beforeMessageId, 10)
                 .complete()
                 .retrievedHistory
                 .asReversed()
                 .filter { !it.author.isBot && it.contentDisplay.isNotBlank() }
                 .map { msg ->
+                    val ref = msg.referencedMessage
                     ContextMessage(
                         authorId = msg.author.id,
                         authorName = msg.member?.effectiveName ?: msg.author.effectiveName,
                         isTarget = msg.author.id == targetUserId,
                         content = msg.contentDisplay.take(250),
                         timestampEpochSec = msg.timeCreated.toEpochSecond(),
+                        position = ContextMessage.POSITION_BEFORE,
+                        replyToAuthorName = ref?.let { it.member?.effectiveName ?: it.author.effectiveName },
+                        replyToExcerpt = ref?.contentDisplay?.trim()?.replace("\n", " ")?.take(60)?.takeIf { it.isNotEmpty() },
+                        reactionsSummary = msg.reactions.take(5).joinToString(", ") { "${it.emoji.name}x${it.count}" }.takeIf { it.isNotBlank() },
                     )
                 }
         }.getOrDefault(emptyList())

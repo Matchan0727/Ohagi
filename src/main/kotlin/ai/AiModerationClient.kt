@@ -14,7 +14,16 @@ data class ContextMessage(
     val isTarget: Boolean,
     val content: String,
     val timestampEpochSec: Long,
-)
+    val position: String = POSITION_BEFORE,
+    val replyToAuthorName: String? = null,
+    val replyToExcerpt: String? = null,
+    val reactionsSummary: String? = null,
+) {
+    companion object {
+        const val POSITION_BEFORE = "BEFORE"
+        const val POSITION_DURING_OR_AFTER = "DURING_OR_AFTER"
+    }
+}
 
 data class ModerationAttachment(
     val fileName: String,
@@ -37,6 +46,7 @@ data class ModerationEvaluationRequest(
     val contextMessages: List<ContextMessage>,
     val targetMessages: List<String>,
     val attachments: List<ModerationAttachment> = emptyList(),
+    val spamMetricsSummary: String? = null,
 )
 
 @Serializable

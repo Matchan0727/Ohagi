@@ -41,8 +41,14 @@ class MessageBatchBuffer(
 ) {
     private data class BufferedMessage(
         val messageId: String,
+        val rawText: String,
         val content: String,
+        val replyToAuthorName: String?,
+        val replyToExcerpt: String?,
         val attachments: List<Message.Attachment>,
+        val embedImageUrls: List<String>,
+        val directImageUrls: List<String>,
+        val isUrlOnly: Boolean,
         val createdAt: Long,
     )
 
@@ -54,6 +60,7 @@ class MessageBatchBuffer(
         val firstCreatedAt: Long = System.currentTimeMillis(),
         val maxWaitMillis: Long = DEFAULT_MAX_WAIT_MILLIS,
         val messages: MutableList<BufferedMessage> = mutableListOf(),
+        val spamReasons: MutableSet<String> = linkedSetOf(),
         var flushJob: Job? = null,
     )
 
@@ -89,6 +96,7 @@ class MessageBatchBuffer(
 
     private val batches = ConcurrentHashMap<String, PendingBatch>()
     private val cadenceTrackers = ConcurrentHashMap<String, UserCadenceTracker>()
+    private val spamDetector = SpamDetector()
 
     companion object {
         // 適応型バッチングのパラメータ
@@ -250,13 +258,40 @@ class MessageBatchBuffer(
         val text = message.contentDisplay.trim()
         val hasAttachments = message.attachments.isNotEmpty()
         val hasStickers = message.stickers.isNotEmpty()
-        if (shouldIgnoreMessage(text, hasAttachments, hasStickers)) return
-
+        val embedImageUrls = extractEmbedImageUrls(message)
+        val directImageUrls = UrlImageFetcher.extractDirectImageUrls(text)
+        val hasUrl = UrlImageFetcher.extractAllUrls(text).isNotEmpty()
+        val isUrlOnly = URL_ONLY_REGEX.matches(text) && !hasAttachments && !hasStickers
+        val displayContent = buildMessageSummary(text, message.attachments, message.stickers.map { it.name })
         val now = System.currentTimeMillis()
+
+        // プリフィルタ前に全発言をスパム検知ウィンドウへ記録（短文連投・URL連投・スタンプ連打も捕捉）
+        val mentionCount = message.mentions.users.size + message.mentions.roles.size +
+            (if (message.mentions.mentionsEveryone()) 5 else 0)
+        val isMediaOnly = (text.isBlank() || isUrlOnly) && (hasAttachments || hasStickers || embedImageUrls.isNotEmpty() || directImageUrls.isNotEmpty())
+        val (spamObs, spamResult) = spamDetector.observe(
+            guildId = guild.id,
+            channelId = channelId,
+            userId = message.author.id,
+            messageId = message.id,
+            rawText = text,
+            summary = displayContent.ifBlank { "(空メッセージ)" },
+            mentionCount = mentionCount,
+            isMediaOrStickerOnly = isMediaOnly,
+            nowMillis = now,
+        )
+
+        if (!spamResult.isSuspicious && shouldIgnoreMessage(text, hasAttachments, hasStickers, hasUrl, embedImageUrls.isNotEmpty())) {
+            spamDetector.rememberSkipped(guild.id, channelId, message.author.id, spamObs)
+            return
+        }
+
         val tracker = cadenceTrackers.computeIfAbsent("${guild.id}:${message.author.id}") { UserCadenceTracker() }
         val window = tracker.recordAndGetWindow(channelId, now)
 
-        val displayContent = buildMessageSummary(text, message.attachments, message.stickers.map { it.name })
+        val ref = message.referencedMessage
+        val replyAuthor = ref?.let { it.member?.effectiveName ?: it.author.effectiveName }
+        val replyExcerpt = ref?.contentDisplay?.trim()?.replace("\n", " ")?.take(60)?.takeIf { it.isNotEmpty() }
         val key = "${guild.id}:$channelId:${message.author.id}"
         var immediateFlushBatch: PendingBatch? = null
 
@@ -269,14 +304,38 @@ class MessageBatchBuffer(
                 firstCreatedAt = now,
                 maxWaitMillis = window.maxWaitMillis,
             )
+            // 直前にスキップされていた短文連投があれば、スパム発火時にまとめて文脈へ合流させる
+            spamResult.recentSkippedSummaries.forEach { skipped ->
+                batch.messages.add(
+                    BufferedMessage(
+                        messageId = message.id,
+                        rawText = skipped,
+                        content = skipped,
+                        replyToAuthorName = null,
+                        replyToExcerpt = null,
+                        attachments = emptyList(),
+                        embedImageUrls = emptyList(),
+                        directImageUrls = emptyList(),
+                        isUrlOnly = false,
+                        createdAt = now,
+                    )
+                )
+            }
             batch.messages.add(
                 BufferedMessage(
                     messageId = message.id,
-                    content = displayContent,
+                    rawText = text,
+                    content = displayContent.ifBlank { "(空メッセージ)" },
+                    replyToAuthorName = replyAuthor,
+                    replyToExcerpt = replyExcerpt,
                     attachments = message.attachments,
+                    embedImageUrls = embedImageUrls,
+                    directImageUrls = directImageUrls,
+                    isUrlOnly = isUrlOnly,
                     createdAt = now,
                 )
             )
+            batch.spamReasons.addAll(spamResult.reasons)
             batch.flushJob?.cancel()
 
             val waited = now - batch.firstCreatedAt
@@ -285,7 +344,13 @@ class MessageBatchBuffer(
                 immediateFlushBatch = batch
                 null
             } else {
-                val nextDelay = minOf(window.debounceMillis, remainingMaxWait.coerceAtLeast(500L))
+                // 明確な重度フラッドスパム時は長待ちせず早めに評価する（最大5秒）
+                val targetDebounce = if (spamResult.isSevereFlood) {
+                    minOf(window.debounceMillis, 5_000L)
+                } else {
+                    window.debounceMillis
+                }
+                val nextDelay = minOf(targetDebounce, remainingMaxWait.coerceAtLeast(500L))
                 batch.flushJob = OhagiBot.scope.launch {
                     delay(nextDelay)
                     val toFlush = batches.remove(key)
@@ -312,9 +377,26 @@ class MessageBatchBuffer(
         return false
     }
 
-    internal fun shouldIgnoreMessage(text: String, hasAttachments: Boolean, hasStickers: Boolean): Boolean {
-        if (hasAttachments || hasStickers) return false
+    internal fun shouldIgnoreMessage(
+        text: String,
+        hasAttachments: Boolean,
+        hasStickers: Boolean,
+        hasUrl: Boolean = false,
+        hasEmbedImages: Boolean = false,
+    ): Boolean {
+        if (hasAttachments || hasStickers || hasEmbedImages) return false
+        // URL を含む場合は Discord の Embed 画像展開を待つため一旦バッチへ通す
+        if (hasUrl) return false
         return shouldIgnoreText(text)
+    }
+
+    private fun extractEmbedImageUrls(msg: Message): List<String> {
+        if (msg.embeds.isEmpty()) return emptyList()
+        return msg.embeds.mapNotNull { embed ->
+            val img = embed.image
+            val thumb = embed.thumbnail
+            (img?.proxyUrl ?: img?.url ?: thumb?.proxyUrl ?: thumb?.url)?.takeIf { it.isNotBlank() }
+        }.distinct()
     }
 
     private fun buildMessageSummary(
@@ -367,13 +449,63 @@ class MessageBatchBuffer(
         )
 
         val firstMessageId = batch.messages.firstOrNull()?.messageId ?: return
-        val contextMessages = fetchContextMessages(channel, firstMessageId, target.userId)
-        val moderationAttachments = downloadBatchAttachments(batch.messages.flatMap { it.attachments })
+        val batchMessageIds = batch.messages.map { it.messageId }.toSet()
+        val fetched = fetchSurroundingContextAndReactions(
+            channel = channel,
+            firstMessageId = firstMessageId,
+            batchMessageIds = batchMessageIds,
+            targetUserId = target.userId,
+        )
+        val contextMessages = fetched.contextMessages
+        val reactionMap = fetched.reactionMap
+
+        // 添付ファイル + Discordが後から展開したEmbed画像 + 本文中の直リンク画像URLを統合取得
+        val urlImageCandidates = linkedSetOf<String>()
+        batch.messages.forEach { bm ->
+            val refreshedEmbedUrls = fetched.embedImagesByMessageId[bm.messageId].orEmpty()
+            val mergedEmbedUrls = (refreshedEmbedUrls + bm.embedImageUrls).distinct()
+            if (mergedEmbedUrls.isNotEmpty()) {
+                urlImageCandidates.addAll(mergedEmbedUrls)
+            } else {
+                urlImageCandidates.addAll(bm.directImageUrls)
+            }
+        }
+
+        val moderationAttachments = downloadBatchAttachments(
+            attachments = batch.messages.flatMap { it.attachments },
+            imageUrls = urlImageCandidates.toList(),
+        )
+
+        // スパム兆候も添付画像も無い「純粋な非画像URLのみ」バッチはAPIを呼ばずコスト節約スキップ
+        val allPlainNonImageUrlOnly = batch.messages.all { it.isUrlOnly } &&
+            batch.spamReasons.isEmpty() &&
+            moderationAttachments.none { it.hasInlineData }
+        if (allPlainNonImageUrlOnly) {
+            OhagiBot.logger.debug("非画像URLのみの発言のためAI評価をスキップしました: guild={}, user={}", guild.id, target.userId)
+            return
+        }
         val rules = watchAiService.listRulesForEvaluation(guild.id, target.id)
         val feedbacks = watchAiService.getFewShotFeedbacks(guild.id, target.id, limit = 12)
         val targetDisplayName = guild.getMemberById(target.userId)?.effectiveName
             ?: guild.jda.getUserById(target.userId)?.effectiveName
             ?: target.userId
+
+        val formattedTargetMessages = batch.messages.map { bm ->
+            buildString {
+                if (!bm.replyToAuthorName.isNullOrBlank()) {
+                    append("[返信先: ${bm.replyToAuthorName}")
+                    if (!bm.replyToExcerpt.isNullOrBlank()) append("「${bm.replyToExcerpt}」")
+                    append("] ")
+                }
+                append(bm.content)
+                val rx = reactionMap[bm.messageId]
+                if (!rx.isNullOrBlank()) {
+                    append(" [リアクション: $rx]")
+                }
+            }
+        }
+
+        val spamSummary = batch.spamReasons.takeIf { it.isNotEmpty() }?.joinToString(" / ")
 
         val evalReq = ModerationEvaluationRequest(
             guildName = guild.name,
@@ -384,8 +516,9 @@ class MessageBatchBuffer(
             rules = rules,
             feedbacks = feedbacks,
             contextMessages = contextMessages,
-            targetMessages = batch.messages.map { it.content },
+            targetMessages = formattedTargetMessages,
             attachments = moderationAttachments,
+            spamMetricsSummary = spamSummary,
         )
 
         val (result, rawJson) = aiClient.evaluate(evalReq) ?: return
@@ -423,8 +556,11 @@ class MessageBatchBuffer(
         }
     }
 
-    private suspend fun downloadBatchAttachments(attachments: List<Message.Attachment>): List<ModerationAttachment> {
-        if (attachments.isEmpty()) return emptyList()
+    private suspend fun downloadBatchAttachments(
+        attachments: List<Message.Attachment>,
+        imageUrls: List<String> = emptyList(),
+    ): List<ModerationAttachment> {
+        if (attachments.isEmpty() && imageUrls.isEmpty()) return emptyList()
         return withContext(Dispatchers.IO) {
             val results = mutableListOf<ModerationAttachment>()
             var downloadedCount = 0
@@ -508,37 +644,119 @@ class MessageBatchBuffer(
                     )
                 }
             }
+
+            // URL画像 / Embed展開画像のダウンロード（SSRF防止チェック済み）
+            for (url in imageUrls) {
+                if (downloadedCount >= MAX_ATTACHMENTS_PER_BATCH) break
+                val remainingBudget = (MAX_TOTAL_BATCH_BYTES - totalBytes).coerceAtMost(MAX_FILE_BYTES)
+                if (remainingBudget <= 0L) break
+
+                val fetchedImg = UrlImageFetcher.fetchImage(url, maxBytes = remainingBudget) ?: continue
+                if (fetchedImg.hasInlineData) {
+                    downloadedCount++
+                    totalBytes += fetchedImg.sizeBytes
+                }
+                results += fetchedImg
+            }
+
             results
         }
     }
 
-    private fun fetchContextMessages(
+    private data class SurroundingFetchResult(
+        val contextMessages: List<ContextMessage>,
+        val reactionMap: Map<String, String>,
+        val embedImagesByMessageId: Map<String, List<String>>,
+    )
+
+    /**
+     * チャンネル最新履歴から「発言前の文脈（最大10件）」「発言の間〜直後の他メンバーの反応（最大8件）」
+     * 「返信先」「待機終了時点のリアクション」「後から展開されたEmbed画像URL」を最小限のAPIコールで一括収集する。
+     */
+    private fun fetchSurroundingContextAndReactions(
         channel: GuildMessageChannel,
-        beforeMessageId: String,
+        firstMessageId: String,
+        batchMessageIds: Set<String>,
         targetUserId: String,
-    ): List<ContextMessage> {
+    ): SurroundingFetchResult {
+        val firstIdLong = firstMessageId.toLongOrNull()
+            ?: return SurroundingFetchResult(emptyList(), emptyMap(), emptyMap())
         return runCatching {
-            channel.getHistoryBefore(beforeMessageId, 6)
-                .complete()
-                .retrievedHistory
-                .asReversed()
-                .filter { !it.author.isBot && (it.contentDisplay.isNotBlank() || it.attachments.isNotEmpty()) }
-                .map { msg ->
-                    val summary = buildMessageSummary(
-                        msg.contentDisplay.trim().take(260),
-                        msg.attachments,
-                        msg.stickers.map { it.name },
-                    )
-                    ContextMessage(
-                        authorId = msg.author.id,
-                        authorName = msg.member?.effectiveName ?: msg.author.effectiveName,
-                        isTarget = msg.author.id == targetUserId,
-                        content = summary.take(300),
-                        timestampEpochSec = msg.timeCreated.toEpochSecond(),
-                    )
+            // 通常は最新25件の1回のAPIコールで発言前・対象発言・直後反応・Embed展開結果をすべて取得できる
+            val latest = channel.history.retrievePast(25).complete().asReversed()
+            val targetMsgsInHistory = latest.filter { it.id in batchMessageIds }
+            val reactionMap = targetMsgsInHistory
+                .mapNotNull { msg ->
+                    val rx = formatReactions(msg)
+                    if (rx != null) msg.id to rx else null
                 }
+                .toMap()
+            val embedImagesByMessageId = targetMsgsInHistory
+                .mapNotNull { msg ->
+                    val urls = extractEmbedImageUrls(msg)
+                    if (urls.isNotEmpty()) msg.id to urls else null
+                }
+                .toMap()
+
+            var beforeRaw = latest.filter { it.idLong < firstIdLong }
+            if (beforeRaw.isEmpty()) {
+                // チャンネルが非常に活発で25件以上流れていた場合のみフォールバック取得
+                beforeRaw = channel.getHistoryBefore(firstMessageId, 10).complete().retrievedHistory.asReversed()
+            }
+
+            val beforeContext = beforeRaw
+                .filter { !it.author.isBot && (it.contentDisplay.isNotBlank() || it.attachments.isNotEmpty()) }
+                .takeLast(10)
+                .map { toContextMessage(it, targetUserId, ContextMessage.POSITION_BEFORE) }
+
+            val afterContext = latest
+                .filter {
+                    it.idLong > firstIdLong &&
+                        it.id !in batchMessageIds &&
+                        !it.author.isBot &&
+                        it.author.id != targetUserId &&
+                        (it.contentDisplay.isNotBlank() || it.attachments.isNotEmpty())
+                }
+                .take(8)
+                .map { toContextMessage(it, targetUserId, ContextMessage.POSITION_DURING_OR_AFTER) }
+
+            SurroundingFetchResult(
+                contextMessages = beforeContext + afterContext,
+                reactionMap = reactionMap,
+                embedImagesByMessageId = embedImagesByMessageId,
+            )
         }.onFailure {
-            OhagiBot.logger.warn("直前メッセージ履歴の取得に失敗しました: channel={}", channel.id, it)
-        }.getOrDefault(emptyList())
+            OhagiBot.logger.warn("周囲メッセージ履歴の取得に失敗しました: channel={}", channel.id, it)
+        }.getOrDefault(SurroundingFetchResult(emptyList(), emptyMap(), emptyMap()))
+    }
+
+    private fun toContextMessage(msg: Message, targetUserId: String, position: String): ContextMessage {
+        val summary = buildMessageSummary(
+            msg.contentDisplay.trim().take(260),
+            msg.attachments,
+            msg.stickers.map { it.name },
+        )
+        val ref = msg.referencedMessage
+        val replyAuthor = ref?.let { it.member?.effectiveName ?: it.author.effectiveName }
+        val replyExcerpt = ref?.contentDisplay?.trim()?.replace("\n", " ")?.take(60)?.takeIf { it.isNotEmpty() }
+        return ContextMessage(
+            authorId = msg.author.id,
+            authorName = msg.member?.effectiveName ?: msg.author.effectiveName,
+            isTarget = msg.author.id == targetUserId,
+            content = summary.take(300),
+            timestampEpochSec = msg.timeCreated.toEpochSecond(),
+            position = position,
+            replyToAuthorName = replyAuthor,
+            replyToExcerpt = replyExcerpt,
+            reactionsSummary = formatReactions(msg),
+        )
+    }
+
+    private fun formatReactions(msg: Message): String? {
+        if (msg.reactions.isEmpty()) return null
+        return msg.reactions
+            .take(5)
+            .joinToString(", ") { "${it.emoji.name}x${it.count}" }
+            .takeIf { it.isNotBlank() }
     }
 }

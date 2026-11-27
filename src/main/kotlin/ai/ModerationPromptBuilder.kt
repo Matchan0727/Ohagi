@@ -9,8 +9,10 @@ object ModerationPromptBuilder {
 
 【重要な前提】
 - 身内サーバーのため、軽い冗談・ゲーム中の一般的な掛け合い・周囲も乗っているボケ/ツッコミは過度に違反としないでください。
+- 発言前の会話だけでなく、**発言の間〜直後に付いた他メンバーの反応（笑って乗っているのか、不快感や注意を示しているのか）・返信先（Reply）・リアクション絵文字**も総合的に踏まえてニュアンスを判断してください。
 - サーバー固有の「違反ルール (NG傾向)」「許容ルール (身内ネタ等)」および「過去のフィードバック修正事例」が提供された場合は、それを最優先で基準にしてください。
 - **添付ファイル（画像・GIF・音声・動画・PDF・スタンプ等）が一緒に渡された場合**は、テキストだけでなくメディア内容も必ず審査してください（例：画像内の暴言・煽り文字、他メンバーを晒すスクリーンショット、グロ・不快・露骨なNSFW画像、悪質なコラ画像や嫌がらせ画像など）。通常のゲームスクショ・ネタミーム・無害な画像は違反としないでください。
+- **スパム行為（`category: "SPAM"`）も審査対象**です：無意味な短文・同一文言・スタンプ・URL・画像のしつこい連投、大量の改行や同一文字の異常連打によるチャット欄の埋め尽くし、過度なメンション連打（ピン爆撃）などは迷惑度に応じて `base_delta` を付与してください。ただし、普通の会話が盛り上がって内容の異なる短文を複数回送っているだけの場合はスパム扱いしないでください。
 
 【base_delta（違反スコア基準値: 0.0〜25.0）】
 - 0.0 (NONE): 問題なし、または身内ノリの許容範囲
@@ -73,18 +75,30 @@ object ModerationPromptBuilder {
             appendLine()
         }
 
-        if (request.contextMessages.isNotEmpty()) {
-            appendLine("## 直前の会話コンテキスト（古い順）")
-            request.contextMessages.forEach { msg ->
-                val roleTag = if (msg.isTarget) "監視対象" else "他メンバー"
-                appendLine("- [$roleTag] ${msg.authorName} (author_id=${msg.authorId}): ${msg.content}")
-            }
+        val beforeMessages = request.contextMessages.filter { it.position == ContextMessage.POSITION_BEFORE }
+        val afterMessages = request.contextMessages.filter { it.position == ContextMessage.POSITION_DURING_OR_AFTER }
+
+        if (beforeMessages.isNotEmpty()) {
+            appendLine("## 発言前の会話コンテキスト（古い順）")
+            beforeMessages.forEach { msg -> appendLine(formatContextLine(msg)) }
             appendLine()
         }
 
         appendLine("## 今回評価する監視対象ユーザーの発言")
         request.targetMessages.forEachIndexed { i, text ->
             appendLine("${i + 1}. $text")
+        }
+
+        if (afterMessages.isNotEmpty()) {
+            appendLine()
+            appendLine("## 発言の間〜直後の他メンバーの反応（古い順）")
+            afterMessages.forEach { msg -> appendLine(formatContextLine(msg)) }
+        }
+
+        if (!request.spamMetricsSummary.isNullOrBlank()) {
+            appendLine()
+            appendLine("## スパム検知メトリクス（自動計測）")
+            appendLine("- 検知内容: ${request.spamMetricsSummary}")
         }
 
         if (request.attachments.isNotEmpty()) {
@@ -184,5 +198,21 @@ object ModerationPromptBuilder {
 
         appendLine("## 今回ユーザーからBotへ送られたメンション/返信メッセージ")
         appendLine(request.appealMessage)
+    }
+
+    private fun formatContextLine(msg: ContextMessage): String = buildString {
+        val roleTag = if (msg.isTarget) "監視対象" else "他メンバー"
+        append("- [$roleTag] ${msg.authorName} (author_id=${msg.authorId})")
+        if (!msg.replyToAuthorName.isNullOrBlank()) {
+            append(" [返信先: ${msg.replyToAuthorName}")
+            if (!msg.replyToExcerpt.isNullOrBlank()) {
+                append("「${msg.replyToExcerpt}」")
+            }
+            append("]")
+        }
+        append(": ${msg.content}")
+        if (!msg.reactionsSummary.isNullOrBlank()) {
+            append(" [リアクション: ${msg.reactionsSummary}]")
+        }
     }
 }
