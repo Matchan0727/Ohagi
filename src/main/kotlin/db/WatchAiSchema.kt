@@ -14,6 +14,7 @@ import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.update
 
 enum class AiRuleType(val displayName: String) {
     VIOLATION("違反ルール (NG傾向)"),
@@ -198,6 +199,42 @@ class WatchAiService(private val database: Database) {
             .where { WatchAiRules.guildId eq guildId }
             .orderBy(WatchAiRules.id, SortOrder.ASC)
             .map { it.toRule() }
+    }
+
+    fun getRuleById(guildId: String, ruleId: Long): WatchAiRule? = transaction(database) {
+        WatchAiRules.selectAll()
+            .where { (WatchAiRules.guildId eq guildId) and (WatchAiRules.id eq ruleId) }
+            .singleOrNull()
+            ?.toRule()
+    }
+
+    fun updateRule(
+        guildId: String,
+        ruleId: Long,
+        ruleType: AiRuleType? = null,
+        description: String? = null,
+        weightHint: AiWeightHint? = null,
+    ): WatchAiRule? = transaction(database) {
+        val current = WatchAiRules.selectAll()
+            .where { (WatchAiRules.guildId eq guildId) and (WatchAiRules.id eq ruleId) }
+            .singleOrNull()
+            ?.toRule() ?: return@transaction null
+
+        val newType = ruleType ?: current.ruleType
+        val newDesc = description?.trim()?.takeIf { it.isNotEmpty() } ?: current.description
+        val newWeight = weightHint ?: current.weightHint
+
+        WatchAiRules.update({ (WatchAiRules.guildId eq guildId) and (WatchAiRules.id eq ruleId) }) {
+            it[WatchAiRules.ruleType] = newType.name
+            it[WatchAiRules.description] = newDesc
+            it[WatchAiRules.weightHint] = newWeight.name
+        }
+
+        current.copy(
+            ruleType = newType,
+            description = newDesc,
+            weightHint = newWeight,
+        )
     }
 
     fun removeRule(guildId: String, ruleId: Long): Boolean = transaction(database) {

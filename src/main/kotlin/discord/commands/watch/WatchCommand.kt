@@ -6,6 +6,7 @@ import jp.simplespace.db.AiAutoTicketMode
 import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
+import jp.simplespace.db.WatchAiRule
 import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
@@ -16,11 +17,21 @@ import jp.simplespace.watchAiService
 import jp.simplespace.watchConfigService
 import jp.simplespace.watchCycleService
 import kotlinx.coroutines.launch
+import net.dv8tion.jda.api.components.actionrow.ActionRow
+import net.dv8tion.jda.api.components.container.Container
+import net.dv8tion.jda.api.components.label.Label
+import net.dv8tion.jda.api.components.selections.SelectOption
+import net.dv8tion.jda.api.components.selections.StringSelectMenu
+import net.dv8tion.jda.api.components.separator.Separator
+import net.dv8tion.jda.api.components.textdisplay.TextDisplay
+import net.dv8tion.jda.api.components.textinput.TextInput
+import net.dv8tion.jda.api.components.textinput.TextInputStyle
 import net.dv8tion.jda.api.entities.channel.ChannelType
 import net.dv8tion.jda.api.interactions.InteractionContextType
 import net.dv8tion.jda.api.interactions.commands.OptionType
 import net.dv8tion.jda.api.interactions.commands.build.OptionData
 import net.dv8tion.jda.api.interactions.commands.build.SubcommandGroupData
+import net.dv8tion.jda.api.modals.Modal
 import java.awt.Color
 import java.util.Locale
 
@@ -46,6 +57,7 @@ class WatchCommand : SlashCommand() {
             // ai グループ
             WatchAiRuleAddSub(),
             WatchAiRuleListSub(),
+            WatchAiRuleEditSub(),
             WatchAiRuleRemoveSub(),
             WatchAiFeedbackSub(),
             // 直下コマンド
@@ -567,18 +579,41 @@ private class WatchAiRuleAddSub : SlashCommand() {
     }
 }
 
-private class WatchAiRuleListSub : SlashCommand() {
-    init {
-        name = "rule-list"
-        help = "登録されているAI判定ルール一覧を表示します。"
-        subcommandGroup = aiGroup()
+object WatchAiRuleUi {
+    const val SELECT_EDIT_ID = "watch_rule_edit_select"
+    const val MODAL_EDIT_PREFIX = "watch_rule_edit_modal:"
+
+    fun buildEditModal(rule: WatchAiRule): Modal {
+        val typeMenu = StringSelectMenu.create("rule_type")
+            .addOption("違反ルール (NG傾向)", AiRuleType.VIOLATION.name)
+            .addOption("許容ルール (身内ネタ・セーフ)", AiRuleType.ALLOW.name)
+            .setDefaultValues(rule.ruleType.name)
+            .build()
+
+        val weightMenu = StringSelectMenu.create("weight_hint")
+            .addOption("軽度 (LOW)", AiWeightHint.LOW.name)
+            .addOption("中度 (MEDIUM)", AiWeightHint.MEDIUM.name)
+            .addOption("重度 (HIGH)", AiWeightHint.HIGH.name)
+            .setDefaultValues(rule.weightHint.name)
+            .build()
+
+        val descInput = TextInput.create("description", TextInputStyle.PARAGRAPH)
+            .setValue(rule.description.take(1000))
+            .setMinLength(1)
+            .setMaxLength(1000)
+            .setRequired(true)
+            .build()
+
+        return Modal.create("$MODAL_EDIT_PREFIX${rule.id}", "AIルール #${rule.id} を編集")
+            .addComponents(
+                Label.of("ルールの種類", typeMenu),
+                Label.of("違反時の重み目安", weightMenu),
+                Label.of("ルール内容", "AI判定の基準を自然言語で入力してください", descInput),
+            )
+            .build()
     }
 
-    override fun execute(event: SlashCommandEvent) {
-        val guild = event.guild
-        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
-        guild!!
-        val rules = watchAiService.listRulesByGuild(guild.id)
+    fun buildRuleListContainer(rules: List<WatchAiRule>, canEdit: Boolean): Container {
         val desc = if (rules.isEmpty()) {
             "サーバー固有のAI判定ルールはまだ登録されていません。"
         } else {
@@ -590,9 +625,127 @@ private class WatchAiRuleListSub : SlashCommand() {
                     val icon = if (r.ruleType == AiRuleType.VIOLATION) "🚫" else "✅"
                     append("- **#${r.id}** $icon [$scope / ${r.weightHint.displayName}] ${r.description}\n")
                 }
+                if (canEdit) {
+                    append("\n-# 下のメニューからルールを選ぶと、そのまま編集フォームが開きます。")
+                }
             }.trim()
         }
-        replyEph(event, "🤖 AI判定ルール一覧", desc, Color(0x36, 0xB8, 0xFA))
+
+        val children = mutableListOf<net.dv8tion.jda.api.components.container.ContainerChildComponent>(
+            TextDisplay.of("## 🤖 AI判定ルール一覧\n$desc")
+        )
+
+        if (canEdit && rules.isNotEmpty()) {
+            val options = rules.take(25).map { r ->
+                val icon = if (r.ruleType == AiRuleType.VIOLATION) "🚫" else "✅"
+                val label = "#${r.id} $icon ${r.description.replace("\n", " ").take(85)}"
+                val sub = "${r.ruleType.displayName} / 重み: ${r.weightHint.displayName}"
+                SelectOption.of(label.take(100), r.id.toString()).withDescription(sub.take(100))
+            }
+            val select = StringSelectMenu.create(SELECT_EDIT_ID)
+                .setPlaceholder("編集するルールを選択...")
+                .addOptions(options)
+                .build()
+            children += Separator.createInvisible(Separator.Spacing.SMALL)
+            children += ActionRow.of(select)
+        }
+
+        return Container.of(children).withAccentColor(Color(0x36, 0xB8, 0xFA))
+    }
+}
+
+private class WatchAiRuleListSub : SlashCommand() {
+    init {
+        name = "rule-list"
+        help = "登録されているAI判定ルール一覧を表示します（管理者はその場で編集可能）。"
+        subcommandGroup = aiGroup()
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        val rules = watchAiService.listRulesByGuild(guild.id)
+        val canEdit = event.member != null && WatchPermissions.isGuildWatchAdmin(guild, event.member!!)
+        val container = WatchAiRuleUi.buildRuleListContainer(rules, canEdit)
+        event.replyComponents(container)
+            .setAllowedMentions(emptyList())
+            .useComponentsV2()
+            .setEphemeral(true)
+            .queue()
+    }
+}
+
+private class WatchAiRuleEditSub : SlashCommand() {
+    init {
+        name = "rule-edit"
+        help = "既存のAI判定ルールを編集します（項目を省略すると編集フォームが開きます）。"
+        subcommandGroup = aiGroup()
+        options = listOf(
+            OptionData(OptionType.INTEGER, "rule_id", "編集するルールID（補完候補から選択可）", true)
+                .setAutoComplete(true),
+            OptionData(OptionType.STRING, "description", "新しいルール内容（省略可）", false),
+            OptionData(OptionType.STRING, "type", "新しいルール種類（省略可）", false)
+                .addChoice("違反ルール (NG傾向)", AiRuleType.VIOLATION.name)
+                .addChoice("許容ルール (身内ネタ・セーフ)", AiRuleType.ALLOW.name),
+            OptionData(OptionType.STRING, "weight", "新しい重み目安（省略可）", false)
+                .addChoice("軽度 (LOW)", AiWeightHint.LOW.name)
+                .addChoice("中度 (MEDIUM)", AiWeightHint.MEDIUM.name)
+                .addChoice("重度 (HIGH)", AiWeightHint.HIGH.name),
+        )
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val ruleId = event.getOption("rule_id")?.asLong ?: return
+        val existing = watchAiService.getRuleById(guild.id, ruleId)
+        if (existing == null) {
+            replyEph(event, "エラー", "AI判定ルール `#${ruleId}` が見つかりません。", Color.RED)
+            return
+        }
+
+        val target = existing.targetId?.let { watchConfigService.getTargetById(it) }
+        if (target != null && WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            replyEph(event, "操作できません", "監視対象者本人は自分専用のルールを編集できません。", Color.RED)
+            return
+        }
+
+        val newDesc = event.optString("description")?.trim()?.takeIf { it.isNotEmpty() }
+        val newTypeStr = event.optString("type")
+        val newWeightStr = event.optString("weight")
+
+        // 変更項目がすべて省略された場合は現在の内容が入った編集モーダルを開く
+        if (newDesc == null && newTypeStr == null && newWeightStr == null) {
+            event.replyModal(WatchAiRuleUi.buildEditModal(existing)).queue()
+            return
+        }
+
+        val newType = newTypeStr?.let { AiRuleType.fromString(it) }
+        val newWeight = newWeightStr?.let { AiWeightHint.fromString(it) }
+        val updated = watchAiService.updateRule(
+            guildId = guild.id,
+            ruleId = ruleId,
+            ruleType = newType,
+            description = newDesc,
+            weightHint = newWeight,
+        )
+        if (updated == null) {
+            replyEph(event, "エラー", "ルール `#${ruleId}` の更新に失敗しました。", Color.RED)
+            return
+        }
+
+        replyEph(
+            event,
+            "✏️ AI判定ルールを更新しました",
+            "- **ルールID**: `#${updated.id}`\n" +
+                "- **種類**: ${updated.ruleType.displayName}（重み: ${updated.weightHint.displayName}）\n" +
+                "- **内容**: ${updated.description}",
+            Color(0x2E, 0xCC, 0x71),
+        )
     }
 }
 
@@ -602,7 +755,8 @@ private class WatchAiRuleRemoveSub : SlashCommand() {
         help = "登録済みのAI判定ルールを削除します。"
         subcommandGroup = aiGroup()
         options = listOf(
-            OptionData(OptionType.INTEGER, "rule_id", "削除するルールID", true),
+            OptionData(OptionType.INTEGER, "rule_id", "削除するルールID（補完候補から選択可）", true)
+                .setAutoComplete(true),
         )
     }
 

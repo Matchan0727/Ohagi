@@ -376,4 +376,21 @@ class WatchSystemTest {
         assertTrue(sysPrompt.contains("空文字"))
         assertTrue(sysPrompt.contains("30文字以内"))
     }
+
+    @Test
+    fun testAiRuleEditModalBuildsWithPrefilledValues() {
+        val rule = WatchAiRule(
+            id = 7,
+            guildId = "g1",
+            targetId = null,
+            ruleType = AiRuleType.ALLOW,
+            description = "ゲーム中の草・ドンマイは許容する",
+            weightHint = AiWeightHint.LOW,
+            createdBy = "admin",
+            createdAt = 0L,
+        )
+        val modal = jp.simplespace.discord.commands.watch.WatchAiRuleUi.buildEditModal(rule)
+        assertEquals("watch_rule_edit_modal:7", modal.id)
+        assertEquals(3, modal.components.size)
+    }
 }

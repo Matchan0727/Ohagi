@@ -290,8 +290,11 @@ Discord のサーバー設定 → **ロール** で以下を確認します。
 # NGルール（見逃しを減らす）
 /watch ai rule-add type:VIOLATION weight:HIGH description:他メンバーの現実の容姿・学歴・仕事に対する人格否定は重く判定する
 ```
-- ルール一覧確認: `/watch ai rule-list`
-- ルール削除: `/watch ai rule-remove rule_id:<ID>`
+- ルール一覧確認＆簡単編集: `/watch ai rule-list`
+  - 管理者が実行すると一覧の下に **「編集するルールを選択...」ドロップダウン** が表示され、選ぶだけで現在の内容が入った編集フォーム（種類・重み・本文）が開きます。
+- コマンドから編集: `/watch ai rule-edit rule_id:<補完から選択> [description] [type] [weight]`
+  - `rule_id` だけ指定すると編集フォームが開き、オプションを指定するとその場で即時更新されます。
+- ルール削除: `/watch ai rule-remove rule_id:<補完から選択>`
 - `user` オプションを指定すれば、特定の監視対象専用のルールも作れます。
 
 ### ステップ 2: 誤判定・見逃しをフィードバック登録する（Few-shot 学習）

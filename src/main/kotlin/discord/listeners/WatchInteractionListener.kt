@@ -1,13 +1,17 @@
 package jp.simplespace.discord.listeners
 
+import jp.simplespace.db.AiRuleType
+import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.VoteChoice
 import jp.simplespace.discord.OhagiBot
+import jp.simplespace.discord.commands.watch.WatchAiRuleUi
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
 import jp.simplespace.watch.BanTicketService
 import jp.simplespace.watch.StatusBoardService
 import jp.simplespace.watch.VoteBanService
 import jp.simplespace.watch.WatchPermissions
 import jp.simplespace.watch.render.GraphRange
+import jp.simplespace.watchAiService
 import jp.simplespace.watchConfigService
 import jp.simplespace.watchCycleService
 import jp.simplespace.watchVoteTicketService
@@ -17,8 +21,10 @@ import net.dv8tion.jda.api.components.buttons.Button
 import net.dv8tion.jda.api.components.container.Container
 import net.dv8tion.jda.api.components.separator.Separator
 import net.dv8tion.jda.api.components.textdisplay.TextDisplay
+import net.dv8tion.jda.api.events.interaction.ModalInteractionEvent
 import net.dv8tion.jda.api.events.interaction.command.CommandAutoCompleteInteractionEvent
 import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent
+import net.dv8tion.jda.api.events.interaction.component.StringSelectInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import net.dv8tion.jda.api.interactions.commands.Command
 import java.awt.Color
@@ -43,7 +49,105 @@ class WatchInteractionListener : ListenerAdapter() {
                 }
             }.distinctBy { it.asString }.take(25)
             event.replyChoices(choices).queue()
+            return
         }
+
+        if (event.name == "watch" &&
+            event.subcommandGroup == "ai" &&
+            (event.subcommandName == "rule-edit" || event.subcommandName == "rule-remove") &&
+            event.focusedOption.name == "rule_id"
+        ) {
+            val typed = event.focusedOption.value.lowercase()
+            val rules = watchAiService.listRulesByGuild(guild.id)
+            val choices = rules.mapNotNull { r ->
+                val icon = if (r.ruleType == AiRuleType.VIOLATION) "🚫" else "✅"
+                val label = "#${r.id} $icon [${r.weightHint.displayName}] ${r.description.replace("\n", " ")}"
+                if (typed.isBlank() || label.lowercase().contains(typed) || r.id.toString().contains(typed)) {
+                    Command.Choice(label.take(100), r.id)
+                } else {
+                    null
+                }
+            }.take(25)
+            event.replyChoices(choices).queue()
+        }
+    }
+
+    override fun onStringSelectInteraction(event: StringSelectInteractionEvent) {
+        val guild = event.guild ?: return
+        if (event.componentId != WatchAiRuleUi.SELECT_EDIT_ID) return
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val ruleId = event.values.firstOrNull()?.toLongOrNull() ?: return
+        val rule = watchAiService.getRuleById(guild.id, ruleId)
+        if (rule == null) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "AI判定ルール `#${ruleId}` が見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        val target = rule.targetId?.let { watchConfigService.getTargetById(it) }
+        if (target != null && WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("操作できません", "監視対象者本人は自分専用のルールを編集できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        event.replyModal(WatchAiRuleUi.buildEditModal(rule)).queue()
+    }
+
+    override fun onModalInteraction(event: ModalInteractionEvent) {
+        val guild = event.guild ?: return
+        if (!event.modalId.startsWith(WatchAiRuleUi.MODAL_EDIT_PREFIX)) return
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val ruleId = event.modalId.substringAfter(WatchAiRuleUi.MODAL_EDIT_PREFIX).toLongOrNull() ?: return
+        val existing = watchAiService.getRuleById(guild.id, ruleId)
+        if (existing == null) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "AI判定ルール `#${ruleId}` が見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        val target = existing.targetId?.let { watchConfigService.getTargetById(it) }
+        if (target != null && WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("操作できません", "監視対象者本人は自分専用のルールを編集できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val newType = event.getValue("rule_type")?.asStringList?.firstOrNull()?.let { AiRuleType.fromString(it) }
+        val newWeight = event.getValue("weight_hint")?.asStringList?.firstOrNull()?.let { AiWeightHint.fromString(it) }
+        val newDesc = event.getValue("description")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+        if (newDesc == null) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("入力エラー", "ルール内容を入力してください。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val updated = watchAiService.updateRule(
+            guildId = guild.id,
+            ruleId = ruleId,
+            ruleType = newType,
+            description = newDesc,
+            weightHint = newWeight,
+        )
+        if (updated == null) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "ルールの更新に失敗しました。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        event.replyComponents(
+            simpleTitleAndDescriptionContainer(
+                "✏️ AI判定ルールを更新しました",
+                "- **ルールID**: `#${updated.id}`\n" +
+                    "- **種類**: ${updated.ruleType.displayName}（重み: ${updated.weightHint.displayName}）\n" +
+                    "- **内容**: ${updated.description}",
+                Color(0x2E, 0xCC, 0x71),
+            )
+        ).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
     }
 
     override fun onButtonInteraction(event: ButtonInteractionEvent) {
