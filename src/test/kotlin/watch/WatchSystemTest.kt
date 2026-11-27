@@ -306,4 +306,38 @@ class WatchSystemTest {
         assertTrue(prompt.contains("event_id=#42"))
         assertTrue(prompt.contains("already_reviewed=true"))
     }
+
+    @Test
+    fun testAdaptiveBatchWindowOptimization() {
+        // 1. サンプル不足時はデフォルト値 (12秒 / 45秒)
+        val initial = MessageBatchBuffer.computeAdaptiveWindow(listOf(3_000L, 4_000L))
+        assertEquals(MessageBatchBuffer.DEFAULT_DEBOUNCE_MILLIS, initial.debounceMillis)
+        assertEquals(MessageBatchBuffer.DEFAULT_MAX_WAIT_MILLIS, initial.maxWaitMillis)
+
+        // 2. 早打ち連投ユーザー (1〜3秒間隔) -> 下限 6秒へ自動短縮
+        val fast = MessageBatchBuffer.computeAdaptiveWindow(listOf(1_500L, 2_000L, 2_500L, 1_800L))
+        assertEquals(MessageBatchBuffer.MIN_DEBOUNCE_MILLIS, fast.debounceMillis)
+        assertEquals(MessageBatchBuffer.MIN_MAX_WAIT_MILLIS, fast.maxWaitMillis)
+
+        // 3. 中速ユーザー (8〜12秒間隔) -> P75(12秒) * 1.35 = 16.2秒前後へ最適化
+        val medium = MessageBatchBuffer.computeAdaptiveWindow(listOf(8_000L, 10_000L, 12_000L, 15_000L))
+        assertTrue(medium.debounceMillis in 14_000L..20_000L)
+        assertTrue(medium.maxWaitMillis > medium.debounceMillis)
+
+        // 4. じっくり入力ユーザー (25〜40秒間隔) -> 上限 30秒 / 最大90秒にクランプ
+        val slow = MessageBatchBuffer.computeAdaptiveWindow(listOf(25_000L, 30_000L, 35_000L, 40_000L))
+        assertEquals(MessageBatchBuffer.MAX_DEBOUNCE_MILLIS, slow.debounceMillis)
+        assertEquals(MessageBatchBuffer.MAX_MAX_WAIT_MILLIS, slow.maxWaitMillis)
+
+        // 5. トラッカーは2分超の空き（別会話）を学習サンプルから除外する
+        val tracker = MessageBatchBuffer.UserCadenceTracker()
+        val t0 = 1_000_000L
+        tracker.recordAndGetWindow("ch1", t0)
+        tracker.recordAndGetWindow("ch1", t0 + 10_000L)  // sample 1: 10s
+        tracker.recordAndGetWindow("ch1", t0 + 20_000L)  // sample 2: 10s
+        tracker.recordAndGetWindow("ch1", t0 + 300_000L) // 280s空き -> 除外
+        val w = tracker.recordAndGetWindow("ch1", t0 + 310_000L) // sample 3: 10s
+        assertEquals(3, w.sampleCount)
+        assertEquals(13_500L, w.debounceMillis)
+    }
 }

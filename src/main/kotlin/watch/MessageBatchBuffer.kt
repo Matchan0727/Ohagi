@@ -19,6 +19,14 @@ import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.entities.channel.middleman.GuildMessageChannel
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.ceil
+import kotlin.math.roundToLong
+
+data class AdaptiveBatchWindow(
+    val debounceMillis: Long,
+    val maxWaitMillis: Long,
+    val sampleCount: Int,
+)
 
 class MessageBatchBuffer(
     private val aiClientProvider: () -> AiModerationClient?,
@@ -44,20 +52,98 @@ class MessageBatchBuffer(
         val userId: String,
         val targetId: Long,
         val firstCreatedAt: Long = System.currentTimeMillis(),
+        val maxWaitMillis: Long = DEFAULT_MAX_WAIT_MILLIS,
         val messages: MutableList<BufferedMessage> = mutableListOf(),
         var flushJob: Job? = null,
     )
 
+    /**
+     * ユーザーごとの連投間隔（同一セッション内の投稿間隔）を記録し、
+     * 最適なデバウンス待機時間・最大待機時間を自動算出するトラッカー。
+     */
+    internal class UserCadenceTracker {
+        private val intervals = ArrayDeque<Long>()
+        private var lastMessageAt: Long? = null
+        private var lastChannelId: String? = null
+
+        @Synchronized
+        fun recordAndGetWindow(channelId: String, nowMillis: Long): AdaptiveBatchWindow {
+            val prevAt = lastMessageAt
+            if (prevAt != null && lastChannelId == channelId) {
+                val gap = nowMillis - prevAt
+                if (gap in MIN_SAMPLE_GAP_MILLIS..MAX_SESSION_GAP_MILLIS) {
+                    if (intervals.size >= MAX_CADENCE_SAMPLES) {
+                        intervals.removeFirst()
+                    }
+                    intervals.addLast(gap)
+                }
+            }
+            lastMessageAt = nowMillis
+            lastChannelId = channelId
+            return computeAdaptiveWindow(intervals.toList())
+        }
+
+        @Synchronized
+        fun currentWindow(): AdaptiveBatchWindow = computeAdaptiveWindow(intervals.toList())
+    }
+
     private val batches = ConcurrentHashMap<String, PendingBatch>()
+    private val cadenceTrackers = ConcurrentHashMap<String, UserCadenceTracker>()
 
     companion object {
-        private const val DEBOUNCE_MILLIS = 5_000L
-        private const val MAX_WAIT_MILLIS = 10_000L
-        private const val MAX_BATCH_SIZE = 5
+        // 適応型バッチングのパラメータ
+        internal const val DEFAULT_DEBOUNCE_MILLIS = 12_000L
+        internal const val MIN_DEBOUNCE_MILLIS = 6_000L
+        internal const val MAX_DEBOUNCE_MILLIS = 30_000L
+
+        internal const val DEFAULT_MAX_WAIT_MILLIS = 45_000L
+        internal const val MIN_MAX_WAIT_MILLIS = 25_000L
+        internal const val MAX_MAX_WAIT_MILLIS = 90_000L
+
+        internal const val TYPING_EXTENSION_MILLIS = 8_000L
+        internal const val MAX_BATCH_SIZE = 12
+
+        internal const val MIN_SAMPLE_GAP_MILLIS = 300L
+        internal const val MAX_SESSION_GAP_MILLIS = 120_000L
+        private const val MAX_CADENCE_SAMPLES = 20
+        private const val MIN_SAMPLES_FOR_ADAPTATION = 3
+        private const val DEBOUNCE_HEADROOM_MULTIPLIER = 1.35
+        private const val MAX_WAIT_TO_DEBOUNCE_RATIO = 3.5
+
         internal const val MAX_FILE_BYTES = 8L * 1024L * 1024L          // 1ファイル最大 8MB
         internal const val MAX_TOTAL_BATCH_BYTES = 15L * 1024L * 1024L  // 1バッチ合計最大 15MB
         internal const val MAX_ATTACHMENTS_PER_BATCH = 4                // 1バッチ最大 4ファイル
         private val URL_ONLY_REGEX = Regex("""^https?://\S+$""", RegexOption.IGNORE_CASE)
+
+        /**
+         * 過去の連投間隔サンプルから、75パーセンタイル × 余裕係数(1.35) で
+         * ユーザーごとの最適な待機時間を算出する。
+         */
+        internal fun computeAdaptiveWindow(samples: List<Long>): AdaptiveBatchWindow {
+            if (samples.size < MIN_SAMPLES_FOR_ADAPTATION) {
+                return AdaptiveBatchWindow(
+                    debounceMillis = DEFAULT_DEBOUNCE_MILLIS,
+                    maxWaitMillis = DEFAULT_MAX_WAIT_MILLIS,
+                    sampleCount = samples.size,
+                )
+            }
+            val sorted = samples.sorted()
+            val p75Index = (ceil(sorted.size * 0.75).toInt() - 1).coerceIn(0, sorted.lastIndex)
+            val p75 = sorted[p75Index]
+
+            val debounce = (p75 * DEBOUNCE_HEADROOM_MULTIPLIER)
+                .roundToLong()
+                .coerceIn(MIN_DEBOUNCE_MILLIS, MAX_DEBOUNCE_MILLIS)
+            val maxWait = (debounce * MAX_WAIT_TO_DEBOUNCE_RATIO)
+                .roundToLong()
+                .coerceIn(MIN_MAX_WAIT_MILLIS, MAX_MAX_WAIT_MILLIS)
+
+            return AdaptiveBatchWindow(
+                debounceMillis = debounce,
+                maxWaitMillis = maxWait,
+                sampleCount = samples.size,
+            )
+        }
 
         private val SUPPORTED_MIME_TYPES = setOf(
             "image/png",
@@ -112,6 +198,39 @@ class MessageBatchBuffer(
         }
     }
 
+    fun getUserAdaptiveWindow(guildId: String, userId: String): AdaptiveBatchWindow {
+        val tracker = cadenceTrackers["$guildId:$userId"]
+        return tracker?.currentWindow() ?: AdaptiveBatchWindow(DEFAULT_DEBOUNCE_MILLIS, DEFAULT_MAX_WAIT_MILLIS, 0)
+    }
+
+    /**
+     * 監視対象ユーザーが同じチャンネルで入力中（タイピング中）のとき、
+     * 待機中バッチがあれば最大待機時間の範囲内でフラッシュを延長して分割送信を防ぐ。
+     */
+    fun onUserTyping(guildId: String, channelId: String, userId: String) {
+        val key = "$guildId:$channelId:$userId"
+        val now = System.currentTimeMillis()
+        batches.computeIfPresent(key) { _, batch ->
+            val remainingMaxWait = batch.maxWaitMillis - (now - batch.firstCreatedAt)
+            if (remainingMaxWait > 1_000L) {
+                val trackerWindow = getUserAdaptiveWindow(guildId, userId)
+                val extendDelay = minOf(
+                    maxOf(TYPING_EXTENSION_MILLIS, trackerWindow.debounceMillis / 2),
+                    remainingMaxWait,
+                )
+                batch.flushJob?.cancel()
+                batch.flushJob = OhagiBot.scope.launch {
+                    delay(extendDelay)
+                    val toFlush = batches.remove(key)
+                    if (toFlush != null) {
+                        evaluateBatch(toFlush, trackerWindow)
+                    }
+                }
+            }
+            batch
+        }
+    }
+
     fun onGuildMessage(message: Message) {
         if (!message.isFromGuild || message.author.isBot) return
         val guild = message.guild
@@ -133,10 +252,12 @@ class MessageBatchBuffer(
         val hasStickers = message.stickers.isNotEmpty()
         if (shouldIgnoreMessage(text, hasAttachments, hasStickers)) return
 
-        val displayContent = buildMessageSummary(text, message.attachments, message.stickers.map { it.name })
-
-        val key = "${guild.id}:$channelId:${message.author.id}"
         val now = System.currentTimeMillis()
+        val tracker = cadenceTrackers.computeIfAbsent("${guild.id}:${message.author.id}") { UserCadenceTracker() }
+        val window = tracker.recordAndGetWindow(channelId, now)
+
+        val displayContent = buildMessageSummary(text, message.attachments, message.stickers.map { it.name })
+        val key = "${guild.id}:$channelId:${message.author.id}"
         var immediateFlushBatch: PendingBatch? = null
 
         batches.compute(key) { _, existing ->
@@ -146,6 +267,7 @@ class MessageBatchBuffer(
                 userId = message.author.id,
                 targetId = target.id,
                 firstCreatedAt = now,
+                maxWaitMillis = window.maxWaitMillis,
             )
             batch.messages.add(
                 BufferedMessage(
@@ -158,16 +280,17 @@ class MessageBatchBuffer(
             batch.flushJob?.cancel()
 
             val waited = now - batch.firstCreatedAt
-            if (batch.messages.size >= MAX_BATCH_SIZE || waited >= MAX_WAIT_MILLIS) {
+            val remainingMaxWait = batch.maxWaitMillis - waited
+            if (batch.messages.size >= MAX_BATCH_SIZE || remainingMaxWait <= 500L) {
                 immediateFlushBatch = batch
                 null
             } else {
-                val nextDelay = minOf(DEBOUNCE_MILLIS, (MAX_WAIT_MILLIS - waited).coerceAtLeast(500L))
+                val nextDelay = minOf(window.debounceMillis, remainingMaxWait.coerceAtLeast(500L))
                 batch.flushJob = OhagiBot.scope.launch {
                     delay(nextDelay)
                     val toFlush = batches.remove(key)
                     if (toFlush != null) {
-                        evaluateBatch(toFlush)
+                        evaluateBatch(toFlush, window)
                     }
                 }
                 batch
@@ -177,7 +300,7 @@ class MessageBatchBuffer(
         val toFlushNow = immediateFlushBatch
         if (toFlushNow != null) {
             OhagiBot.scope.launch {
-                evaluateBatch(toFlushNow)
+                evaluateBatch(toFlushNow, window)
             }
         }
     }
@@ -218,7 +341,7 @@ class MessageBatchBuffer(
         }
     }
 
-    private suspend fun evaluateBatch(batch: PendingBatch) {
+    private suspend fun evaluateBatch(batch: PendingBatch, window: AdaptiveBatchWindow) {
         val aiClient = aiClientProvider()
         if (aiClient == null || !aiClient.isConfigured) {
             OhagiBot.logger.debug("AIクライアント未設定のため監視評価をスキップしました")
@@ -232,6 +355,16 @@ class MessageBatchBuffer(
 
         val config = watchConfigService.getOrCreateConfig(guild.id)
         if (!config.aiEnabled) return
+
+        OhagiBot.logger.info(
+            "AI監視バッチ評価を実行: guild={}, user={}, batchSize={}件, adaptiveDebounce={}ms, maxWait={}ms (samples={})",
+            guild.id,
+            target.userId,
+            batch.messages.size,
+            window.debounceMillis,
+            window.maxWaitMillis,
+            window.sampleCount,
+        )
 
         val firstMessageId = batch.messages.firstOrNull()?.messageId ?: return
         val contextMessages = fetchContextMessages(channel, firstMessageId, target.userId)

@@ -8,6 +8,7 @@ import jp.simplespace.watch.WatchAppealService
 import kotlinx.coroutines.launch
 import net.dv8tion.jda.api.events.guild.member.GuildMemberJoinEvent
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
+import net.dv8tion.jda.api.events.user.UserTypingEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 
 class WatchEventListener(
@@ -33,6 +34,12 @@ class WatchEventListener(
                 OhagiBot.logger.error("WatchEventListener メッセージ処理中にエラー", e)
             }
         }
+    }
+
+    override fun onUserTyping(event: UserTypingEvent) {
+        val guild = event.guild ?: return
+        if (event.user.isBot) return
+        messageBatchBuffer.onUserTyping(guild.id, event.channel.id, event.user.id)
     }
 
     override fun onGuildMemberJoin(event: GuildMemberJoinEvent) {
