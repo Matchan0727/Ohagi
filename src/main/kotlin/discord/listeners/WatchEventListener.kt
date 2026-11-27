@@ -4,6 +4,7 @@ import jp.simplespace.discord.OhagiBot
 import jp.simplespace.watch.MessageBatchBuffer
 import jp.simplespace.watch.PendingBanManager
 import jp.simplespace.watch.RoleRestoreService
+import jp.simplespace.watch.WatchAppealService
 import kotlinx.coroutines.launch
 import net.dv8tion.jda.api.events.guild.member.GuildMemberJoinEvent
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
@@ -22,7 +23,11 @@ class WatchEventListener(
                 val consumedAsLastWords = PendingBanManager.handlePossibleLastWords(message)
                 if (consumedAsLastWords) return@launch
 
-                // 2. 通常のAI違反監視バッチへ投入
+                // 2. 監視対象者からBotへのメンション／返信による罰則理由確認・異議申し立て
+                val consumedAsAppeal = WatchAppealService.handlePossibleAppeal(message)
+                if (consumedAsAppeal) return@launch
+
+                // 3. 通常のAI違反監視バッチへ投入
                 messageBatchBuffer.onGuildMessage(message)
             } catch (e: Exception) {
                 OhagiBot.logger.error("WatchEventListener メッセージ処理中にエラー", e)

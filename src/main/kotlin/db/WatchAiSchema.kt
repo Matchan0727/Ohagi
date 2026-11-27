@@ -48,6 +48,38 @@ enum class AiFeedbackVerdict(val displayName: String) {
     }
 }
 
+enum class AppealDecision(val displayName: String) {
+    EXPLAIN_ONLY("罰則理由の説明"),
+    UPHELD("異議棄却（罰則維持）"),
+    REDUCED("異議一部容認（罰則軽減）"),
+    REVOKED("異議容認（違反撤回）"),
+    ESCALATED("異議棄却＋加重ペナルティ");
+
+    val isFinalizedReview: Boolean
+        get() = this != EXPLAIN_ONLY
+
+    companion object {
+        fun fromString(v: String?): AppealDecision =
+            entries.firstOrNull { it.name.equals(v, ignoreCase = true) } ?: UPHELD
+    }
+}
+
+@Serializable
+data class WatchAppeal(
+    val id: Long,
+    val guildId: String,
+    val targetId: Long,
+    val cycleId: Long,
+    val scoreEventId: Long?,
+    val appealChannelId: String,
+    val appealMessageId: String,
+    val appealContent: String,
+    val decision: AppealDecision,
+    val appliedDelta: Double,
+    val botReply: String,
+    val createdAt: Long,
+)
+
 @Serializable
 data class WatchAiRule(
     val id: Long,
@@ -107,9 +139,26 @@ class WatchAiService(private val database: Database) {
         override val primaryKey = PrimaryKey(id)
     }
 
+    object WatchAppeals : Table("watch_appeals") {
+        val id = long("id").autoIncrement()
+        val guildId = varchar("guild_id", 64).index("idx_watch_appeals_guild")
+        val targetId = long("target_id").index("idx_watch_appeals_target")
+        val cycleId = long("cycle_id")
+        val scoreEventId = long("score_event_id").nullable().index("idx_watch_appeals_event")
+        val appealChannelId = varchar("appeal_channel_id", 64)
+        val appealMessageId = varchar("appeal_message_id", 64)
+        val appealContent = text("appeal_content")
+        val decision = varchar("decision", 24)
+        val appliedDelta = double("applied_delta").default(0.0)
+        val botReply = text("bot_reply")
+        val createdAt = long("created_at")
+
+        override val primaryKey = PrimaryKey(id)
+    }
+
     init {
         transaction(database) {
-            SchemaUtils.create(WatchAiRules, WatchAiFeedbacks)
+            SchemaUtils.create(WatchAiRules, WatchAiFeedbacks, WatchAppeals)
         }
     }
 
@@ -221,6 +270,64 @@ class WatchAiService(private val database: Database) {
 
             targetSpecific + guildWide
         }
+
+    fun hasFinalizedAppealForEvent(scoreEventId: Long): Boolean = transaction(database) {
+        WatchAppeals.selectAll()
+            .where { WatchAppeals.scoreEventId eq scoreEventId }
+            .any { AppealDecision.fromString(it[WatchAppeals.decision]).isFinalizedReview }
+    }
+
+    fun getLastAppealTimestamp(guildId: String, targetId: Long): Long? = transaction(database) {
+        WatchAppeals.selectAll()
+            .where { (WatchAppeals.guildId eq guildId) and (WatchAppeals.targetId eq targetId) }
+            .orderBy(WatchAppeals.createdAt, SortOrder.DESC)
+            .limit(1)
+            .singleOrNull()
+            ?.get(WatchAppeals.createdAt)
+    }
+
+    fun recordAppeal(
+        guildId: String,
+        targetId: Long,
+        cycleId: Long,
+        scoreEventId: Long?,
+        appealChannelId: String,
+        appealMessageId: String,
+        appealContent: String,
+        decision: AppealDecision,
+        appliedDelta: Double,
+        botReply: String,
+    ): WatchAppeal = transaction(database) {
+        val now = System.currentTimeMillis()
+        val id = WatchAppeals.insert {
+            it[WatchAppeals.guildId] = guildId
+            it[WatchAppeals.targetId] = targetId
+            it[WatchAppeals.cycleId] = cycleId
+            it[WatchAppeals.scoreEventId] = scoreEventId
+            it[WatchAppeals.appealChannelId] = appealChannelId
+            it[WatchAppeals.appealMessageId] = appealMessageId
+            it[WatchAppeals.appealContent] = appealContent.take(1000)
+            it[WatchAppeals.decision] = decision.name
+            it[WatchAppeals.appliedDelta] = appliedDelta
+            it[WatchAppeals.botReply] = botReply.take(2000)
+            it[WatchAppeals.createdAt] = now
+        }[WatchAppeals.id]
+
+        WatchAppeal(
+            id = id,
+            guildId = guildId,
+            targetId = targetId,
+            cycleId = cycleId,
+            scoreEventId = scoreEventId,
+            appealChannelId = appealChannelId,
+            appealMessageId = appealMessageId,
+            appealContent = appealContent.take(1000),
+            decision = decision,
+            appliedDelta = appliedDelta,
+            botReply = botReply.take(2000),
+            createdAt = now,
+        )
+    }
 
     private fun ResultRow.toRule(): WatchAiRule = WatchAiRule(
         id = this[WatchAiRules.id],

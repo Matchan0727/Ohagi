@@ -46,6 +46,7 @@ enum class WatchScoreEventType(val displayName: String) {
     AI_VIOLATION("AI違反検知"),
     DECAY("時間減衰"),
     MANUAL_ADJUST("手動調整"),
+    APPEAL_ADJUST("異議申し立て見直し"),
     VOTE_BAN("投票BAN可決"),
     TICKET_BAN("処刑チケット行使"),
     BANNED("BAN執行");
@@ -482,6 +483,17 @@ class WatchCycleService(private val database: Database) {
             .limit(1)
             .singleOrNull()
             ?.toEvent()
+    }
+
+    fun getRecentViolationsForCycle(cycleId: Long, limit: Int = 5): List<WatchScoreEvent> = transaction(database) {
+        WatchScoreEvents.selectAll()
+            .where {
+                (WatchScoreEvents.cycleId eq cycleId) and
+                    (WatchScoreEvents.eventType eq WatchScoreEventType.AI_VIOLATION.name)
+            }
+            .orderBy(WatchScoreEvents.createdAt, SortOrder.DESC)
+            .limit(limit)
+            .map { it.toEvent() }
     }
 
     fun getEventsForTargetSince(targetId: Long, sinceMillis: Long?): List<WatchScoreEvent> = transaction(database) {

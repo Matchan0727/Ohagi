@@ -1,5 +1,7 @@
 package jp.simplespace.watch
 
+import jp.simplespace.ai.AppealReviewRequest
+import jp.simplespace.ai.AppealReviewResult
 import jp.simplespace.ai.ContextMessage
 import jp.simplespace.ai.GeminiClientSettings
 import jp.simplespace.ai.GeminiModerationClient
@@ -10,6 +12,7 @@ import jp.simplespace.ai.ModerationPromptBuilder
 import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
+import jp.simplespace.db.AppealDecision
 import jp.simplespace.db.WatchAiFeedback
 import jp.simplespace.db.WatchAiRule
 import jp.simplespace.db.WatchCycle
@@ -238,5 +241,69 @@ class WatchSystemTest {
         assertEquals(2, parts.size)
         assertTrue(parts[1].inlineData().isPresent)
         assertEquals("image/png", parts[1].inlineData().get().mimeType().orElse(""))
+    }
+
+    @Test
+    fun testAppealSafeAdjustmentGuardsAndParsing() {
+        val originalEvent = WatchScoreEvent(
+            id = 42, cycleId = 1, targetId = 1, guildId = "g1", userId = "u1",
+            eventType = WatchScoreEventType.AI_VIOLATION, delta = 8.0, scoreAfter = 28.0,
+            category = "INSULT", reason = "暴言", sourceChannelId = "c1", sourceMessageId = "m1",
+            sourceMessageExcerpt = "バカ野郎", aiRawJson = null, actorUserId = null, createdAt = 1000L,
+        )
+
+        // 1. 元の違反加算(+8.0)を超える減額(-50.0)をAIが返しても、-8.0(撤回)にクランプされる
+        val overReduce = AppealReviewResult(intent = "APPEAL", targetEventId = 42, decision = "REDUCED", scoreAdjustment = -50.0)
+        val (d1, adj1) = overReduce.computeSafeAdjustment(originalEvent, alreadyReviewed = false, maxDeltaPerEval = 25.0)
+        assertEquals(AppealDecision.REVOKED, d1)
+        assertEquals(-8.0, adj1)
+
+        // 2. 既に審査済みのイベントへの減額は強制的にUPHELD(0.0)へブロック
+        val (d2, adj2) = overReduce.computeSafeAdjustment(originalEvent, alreadyReviewed = true, maxDeltaPerEval = 25.0)
+        assertEquals(AppealDecision.UPHELD, d2)
+        assertEquals(0.0, adj2)
+
+        // 3. 棄却時はスコア変更なし
+        val upheld = AppealReviewResult(intent = "APPEAL", targetEventId = 42, decision = "UPHELD", scoreAdjustment = -5.0)
+        val (d3, adj3) = upheld.computeSafeAdjustment(originalEvent, alreadyReviewed = false, maxDeltaPerEval = 25.0)
+        assertEquals(AppealDecision.UPHELD, d3)
+        assertEquals(0.0, adj3)
+
+        // 4. 加重ペナルティは最大10.0%にキャップされる
+        val escalated = AppealReviewResult(intent = "APPEAL", targetEventId = 42, decision = "ESCALATED", scoreAdjustment = 30.0)
+        val (d4, adj4) = escalated.computeSafeAdjustment(originalEvent, alreadyReviewed = false, maxDeltaPerEval = 25.0)
+        assertEquals(AppealDecision.ESCALATED, d4)
+        assertEquals(10.0, adj4)
+
+        // 5. #ID抽出とJSONパースとプロンプト組み立て
+        assertEquals(42L, WatchAppealService.extractMentionedEventId("さっきの #42 はゲームのセリフなんだけど"))
+        assertEquals(null, WatchAppealService.extractMentionedEventId("なんで増えたの？"))
+
+        val client = GeminiModerationClient(GeminiClientSettings(provider = "gemini_api", googleApiKey = null))
+        val parsed = client.parseAppealResponseJson(
+            """{"intent":"APPEAL","target_event_id":42,"decision":"REDUCED","score_adjustment":-4.0,"reply_ja":"文脈を確認し一部軽減します","audit_reason_ja":"ゲーム内発言と確認"}"""
+        )
+        assertEquals("APPEAL", parsed.intent)
+        assertEquals(42L, parsed.targetEventId)
+        assertEquals(-4.0, parsed.scoreAdjustment)
+
+        val prompt = ModerationPromptBuilder.buildAppealUserPrompt(
+            AppealReviewRequest(
+                guildName = "身内鯖",
+                channelName = "監視ch",
+                targetUserId = "u1",
+                targetDisplayName = "T氏",
+                currentScore = 28.0,
+                personaNote = null,
+                rules = emptyList(),
+                feedbacks = emptyList(),
+                recentViolations = listOf(originalEvent),
+                alreadyReviewedEventIds = setOf(42L),
+                contextMessages = emptyList(),
+                appealMessage = "#42 は冗談だったから消して",
+            )
+        )
+        assertTrue(prompt.contains("event_id=#42"))
+        assertTrue(prompt.contains("already_reviewed=true"))
     }
 }

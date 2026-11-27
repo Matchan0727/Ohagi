@@ -172,6 +172,44 @@ class GeminiModerationClient(
         return json.decodeFromString<ModerationEvaluationResult>(cleaned)
     }
 
+    override suspend fun reviewAppeal(request: AppealReviewRequest): Pair<AppealReviewResult, String>? {
+        val activeClient = client ?: return null
+        val systemInstruction = Content.fromParts(Part.fromText(ModerationPromptBuilder.buildAppealSystemInstruction()))
+        val userPrompt = ModerationPromptBuilder.buildAppealUserPrompt(request)
+
+        val config = GenerateContentConfig.builder()
+            .systemInstruction(systemInstruction)
+            .responseMimeType("application/json")
+            .responseSchema(appealResponseSchema)
+            .temperature(0.2f)
+            .candidateCount(1)
+            .build()
+
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val response = activeClient.models.generateContent(settings.model, userPrompt, config)
+                val rawText = response.text()?.trim()
+                if (rawText.isNullOrEmpty()) {
+                    OhagiBot.logger.warn("Gemini API 異議審査から空レスポンスが返りました")
+                    return@runCatching null
+                }
+                val parsed = parseAppealResponseJson(rawText)
+                parsed to rawText
+            }.onFailure {
+                OhagiBot.logger.error("Gemini API 異議審査呼び出しに失敗しました (model={})", settings.model, it)
+            }.getOrNull()
+        }
+    }
+
+    internal fun parseAppealResponseJson(rawJson: String): AppealReviewResult {
+        val cleaned = rawJson
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+        return json.decodeFromString<AppealReviewResult>(cleaned)
+    }
+
     companion object {
         private val responseSchema: Schema by lazy {
             Schema.builder()
@@ -196,6 +234,31 @@ class GeminiModerationClient(
                         "category",
                         "reason_ja",
                         "suggest_ban_ticket",
+                    )
+                )
+                .build()
+        }
+
+        private val appealResponseSchema: Schema by lazy {
+            Schema.builder()
+                .type(Type.Known.OBJECT)
+                .properties(
+                    mapOf(
+                        "intent" to Schema.builder().type(Type.Known.STRING).build(),
+                        "target_event_id" to Schema.builder().type(Type.Known.INTEGER).nullable(true).build(),
+                        "decision" to Schema.builder().type(Type.Known.STRING).build(),
+                        "score_adjustment" to Schema.builder().type(Type.Known.NUMBER).build(),
+                        "reply_ja" to Schema.builder().type(Type.Known.STRING).build(),
+                        "audit_reason_ja" to Schema.builder().type(Type.Known.STRING).build(),
+                    )
+                )
+                .required(
+                    listOf(
+                        "intent",
+                        "decision",
+                        "score_adjustment",
+                        "reply_ja",
+                        "audit_reason_ja",
                     )
                 )
                 .build()
