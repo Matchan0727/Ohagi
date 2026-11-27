@@ -3,6 +3,7 @@ package jp.simplespace.watch.render
 import jp.simplespace.db.WatchCycleStatus
 import java.awt.BasicStroke
 import java.awt.Color
+import java.awt.FontMetrics
 import java.awt.GradientPaint
 import java.awt.RenderingHints
 import java.awt.geom.RoundRectangle2D
@@ -51,10 +52,19 @@ object ProgressBarRenderer {
                 else -> ColorGradient.colorForScore(clamped)
             }
 
+            // 右上: パーセンテージ（先に幅を測って名前と重ならないようにする）
+            val pctStr = String.format(Locale.US, "%.1f%%", clamped)
+            g.font = FontLoader.bold(38f)
+            g.color = accent
+            val fmPct = g.fontMetrics
+            val pctWidth = fmPct.stringWidth(pctStr)
+            g.drawString(pctStr, WIDTH - 28 - pctWidth, 58)
+
             // ヘッダ: ユーザー名 + サイクル
             g.font = FontLoader.bold(24f)
             g.color = TEXT_PRIMARY
-            val safeName = if (displayName.length > 22) displayName.take(21) + "…" else displayName
+            val maxNameWidth = WIDTH - 28 - 28 - pctWidth - 20
+            val safeName = ellipsizeToWidth(displayName, g.fontMetrics, maxNameWidth)
             g.drawString(safeName, 28, 46)
 
             g.font = FontLoader.regular(15f)
@@ -66,13 +76,6 @@ object ProgressBarRenderer {
                 WatchCycleStatus.ARCHIVED -> "Cycle #$cycleNumber | アーカイブ"
             }
             g.drawString(statusBadge, 28, 70)
-
-            // 右上: パーセンテージ大きく表示
-            val pctStr = String.format(Locale.US, "%.1f%%", clamped)
-            g.font = FontLoader.bold(38f)
-            g.color = accent
-            val fmPct = g.fontMetrics
-            g.drawString(pctStr, WIDTH - 28 - fmPct.stringWidth(pctStr), 58)
 
             // プログレスバートラック
             val barX = 28.0
@@ -114,10 +117,10 @@ object ProgressBarRenderer {
             g.stroke = BasicStroke(1.5f)
             g.draw(trackShape)
 
-            // 下部フッター
+            // 下部フッター（実測幅ベースで綺麗に省略）
             g.font = FontLoader.regular(14f)
             g.color = TEXT_SECONDARY
-            val trimmedFooter = if (footerText.length > 62) footerText.take(61) + "…" else footerText
+            val trimmedFooter = ellipsizeToWidth(footerText, g.fontMetrics, WIDTH - 56)
             g.drawString(trimmedFooter, 28, 158)
         } finally {
             g.dispose()
@@ -126,5 +129,19 @@ object ProgressBarRenderer {
         val baos = ByteArrayOutputStream()
         ImageIO.write(img, "png", baos)
         return baos.toByteArray()
+    }
+
+    private fun ellipsizeToWidth(text: String, fm: FontMetrics, maxWidth: Int): String {
+        if (maxWidth <= 0) return ""
+        val singleLine = text.replace("\n", " ").trim()
+        if (fm.stringWidth(singleLine) <= maxWidth) return singleLine
+        val ellipsis = "…"
+        val ellipsisW = fm.stringWidth(ellipsis)
+        val sb = StringBuilder()
+        for (ch in singleLine) {
+            if (fm.stringWidth(sb.toString() + ch) + ellipsisW > maxWidth) break
+            sb.append(ch)
+        }
+        return sb.toString() + ellipsis
     }
 }

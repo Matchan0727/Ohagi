@@ -3,6 +3,7 @@ package jp.simplespace.watch
 import jp.simplespace.ai.ContextMessage
 import jp.simplespace.ai.GeminiClientSettings
 import jp.simplespace.ai.GeminiModerationClient
+import jp.simplespace.ai.ModerationAttachment
 import jp.simplespace.ai.ModerationEvaluationRequest
 import jp.simplespace.ai.ModerationEvaluationResult
 import jp.simplespace.ai.ModerationPromptBuilder
@@ -18,6 +19,7 @@ import jp.simplespace.db.WatchScoreEvent
 import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.db.WatchVoteTally
 import jp.simplespace.watch.render.ColorGradient
+import jp.simplespace.watch.render.FontLoader
 import jp.simplespace.watch.render.GraphRange
 import jp.simplespace.watch.render.HistoryGraphRenderer
 import jp.simplespace.watch.render.ProgressBarRenderer
@@ -46,6 +48,9 @@ class WatchSystemTest {
 
     @Test
     fun testProgressBarAndHistoryGraphRenderValidPng() {
+        assertTrue(FontLoader.supportsJapanese(FontLoader.regular(16f)))
+        assertTrue(FontLoader.supportsJapanese(FontLoader.bold(20f)))
+
         val barPng = ProgressBarRenderer.render(
             displayName = "T氏テスト",
             cycleNumber = 2,
@@ -190,5 +195,48 @@ class WatchSystemTest {
         assertTrue(buffer.shouldIgnoreText("草"))
         assertTrue(buffer.shouldIgnoreText("https://example.com/test"))
         assertFalse(buffer.shouldIgnoreText("おいマジでいい加減にしろ"))
+
+        // テキストが空でも添付ファイルやスタンプがあれば審査対象とする
+        assertTrue(buffer.shouldIgnoreMessage("", hasAttachments = false, hasStickers = false))
+        assertFalse(buffer.shouldIgnoreMessage("", hasAttachments = true, hasStickers = false))
+        assertFalse(buffer.shouldIgnoreMessage("草", hasAttachments = true, hasStickers = false))
+        assertFalse(buffer.shouldIgnoreMessage("", hasAttachments = false, hasStickers = true))
+
+        // MIME判定
+        assertEquals("image/png", MessageBatchBuffer.resolveSupportedMimeType("image/png; charset=utf-8", "test.png"))
+        assertEquals("image/jpeg", MessageBatchBuffer.resolveSupportedMimeType(null, "photo.JPG"))
+        assertEquals("application/pdf", MessageBatchBuffer.resolveSupportedMimeType("application/pdf", "doc.pdf"))
+        assertEquals(null, MessageBatchBuffer.resolveSupportedMimeType("application/zip", "archive.zip"))
+    }
+
+    @Test
+    fun testMultimodalAttachmentContentBuilder() {
+        val client = GeminiModerationClient(GeminiClientSettings(provider = "gemini_api", googleApiKey = null))
+        val fakePngBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
+        val req = ModerationEvaluationRequest(
+            guildName = "身内鯖",
+            channelName = "general",
+            targetUserId = "u1",
+            targetDisplayName = "T氏",
+            personaNote = null,
+            rules = emptyList(),
+            feedbacks = emptyList(),
+            contextMessages = emptyList(),
+            targetMessages = listOf("[画像: toxic.png]"),
+            attachments = listOf(
+                ModerationAttachment("toxic.png", "image/png", fakePngBytes.size.toLong(), bytes = fakePngBytes),
+                ModerationAttachment("huge.mp4", "video/mp4", 20_000_000L, bytes = null, skippedReason = "上限超過"),
+            ),
+        )
+        val prompt = ModerationPromptBuilder.buildUserPrompt(req)
+        assertTrue(prompt.contains("toxic.png"))
+        assertTrue(prompt.contains("未解析: 上限超過"))
+
+        val content = client.buildUserContent(req)
+        val parts = content.parts().orElse(emptyList())
+        // テキストパート1つ + バイナリがある添付1つ = 2パート
+        assertEquals(2, parts.size)
+        assertTrue(parts[1].inlineData().isPresent)
+        assertEquals("image/png", parts[1].inlineData().get().mimeType().orElse(""))
     }
 }

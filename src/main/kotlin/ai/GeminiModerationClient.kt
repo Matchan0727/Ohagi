@@ -13,7 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 data class GeminiClientSettings(
-    val provider: String = "vertex",
+    val provider: String = "enterprise",
     val model: String = DEFAULT_MODEL,
     val googleApiKey: String? = null,
     val gcpProjectId: String? = null,
@@ -32,7 +32,7 @@ data class GeminiClientSettings(
                 return System.getenv(envKey)?.trim()?.takeIf { it.isNotEmpty() }
             }
 
-            val provider = prop("provider", "AI_PROVIDER") ?: "vertex"
+            val provider = prop("provider", "AI_PROVIDER") ?: "enterprise"
             val model = prop("model", "AI_MODEL") ?: DEFAULT_MODEL
             val apiKey = prop("google_api_key", "GOOGLE_API_KEY")
                 ?: System.getenv("GEMINI_API_KEY")?.trim()?.takeIf { it.isNotEmpty() }
@@ -80,17 +80,40 @@ class GeminiModerationClient(
                     }
                 }
                 else -> {
+                    // Gemini Enterprise Agent Platform (旧 Vertex AI)
+                    // 1) Project + Location (+ 任意で API Key / または ADC・サービスアカウント JSON)
+                    // 2) Express Mode (API Key のみ + enterprise(true))
                     val project = settings.gcpProjectId
                     val location = settings.gcpLocation ?: "global"
-                    if (project.isNullOrBlank()) {
-                        OhagiBot.logger.warn("Vertex AI の GCP_PROJECT_ID が未設定のためAI違反判定は無効です")
-                        null
-                    } else {
-                        Client.builder()
-                            .project(project)
-                            .location(location)
-                            .vertexAI(true)
-                            .build()
+                    val apiKey = settings.googleApiKey
+                    when {
+                        !project.isNullOrBlank() && !apiKey.isNullOrBlank() -> {
+                            Client.builder()
+                                .project(project)
+                                .location(location)
+                                .apiKey(apiKey)
+                                .enterprise(true)
+                                .build()
+                        }
+                        !project.isNullOrBlank() -> {
+                            Client.builder()
+                                .project(project)
+                                .location(location)
+                                .enterprise(true)
+                                .build()
+                        }
+                        !apiKey.isNullOrBlank() -> {
+                            Client.builder()
+                                .apiKey(apiKey)
+                                .enterprise(true)
+                                .build()
+                        }
+                        else -> {
+                            OhagiBot.logger.warn(
+                                "Gemini Platform (enterprise) の認証情報が未設定のためAI違反判定は無効です (GCP_PROJECT_ID または GOOGLE_API_KEY を設定してください)"
+                            )
+                            null
+                        }
                     }
                 }
             }
@@ -102,7 +125,7 @@ class GeminiModerationClient(
     override suspend fun evaluate(request: ModerationEvaluationRequest): Pair<ModerationEvaluationResult, String>? {
         val activeClient = client ?: return null
         val systemInstruction = Content.fromParts(Part.fromText(ModerationPromptBuilder.buildSystemInstruction()))
-        val userPrompt = ModerationPromptBuilder.buildUserPrompt(request)
+        val userContent = buildUserContent(request)
 
         val config = GenerateContentConfig.builder()
             .systemInstruction(systemInstruction)
@@ -114,7 +137,7 @@ class GeminiModerationClient(
 
         return withContext(Dispatchers.IO) {
             runCatching {
-                val response = activeClient.models.generateContent(settings.model, userPrompt, config)
+                val response = activeClient.models.generateContent(settings.model, userContent, config)
                 val rawText = response.text()?.trim()
                 if (rawText.isNullOrEmpty()) {
                     OhagiBot.logger.warn("Gemini API から空レスポンスが返りました")
@@ -126,6 +149,18 @@ class GeminiModerationClient(
                 OhagiBot.logger.error("Gemini API 違反判定呼び出しに失敗しました (model={})", settings.model, it)
             }.getOrNull()
         }
+    }
+
+    internal fun buildUserContent(request: ModerationEvaluationRequest): Content {
+        val parts = mutableListOf<Part>()
+        parts += Part.fromText(ModerationPromptBuilder.buildUserPrompt(request))
+        request.attachments.forEach { att ->
+            val bytes = att.bytes
+            if (bytes != null && bytes.isNotEmpty()) {
+                parts += Part.fromBytes(bytes, att.mimeType)
+            }
+        }
+        return Content.fromParts(*parts.toTypedArray())
     }
 
     internal fun parseResponseJson(rawJson: String): ModerationEvaluationResult {

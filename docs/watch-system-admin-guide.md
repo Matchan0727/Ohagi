@@ -1,0 +1,304 @@
+# メンバー監視・エンタメ処罰機能（Watch System）運営向け設定・運用ガイド
+
+このドキュメントは、Ohagi Discord Bot のメンバー監視機能（Watch System）を導入・設定・運用する **Bot オーナー** および **Discord サーバー管理者** 向けのガイドです。
+システム内部の技術設計については [watch-system-design.md](./watch-system-design.md) を参照してください。
+
+---
+
+## 1. 権限の役割分担
+
+本機能はデフォルトで全サーバー無効になっています。操作権限は3段階に分かれています。
+
+| 役割 | 該当者 | できること |
+| :--- | :--- | :--- |
+| **Bot オーナー** | `DISCORD_OWNER_ID` のユーザー | サーバーごとの Feature Flag 有効化・無効化（`/mod feature`）、全サーバーの管理介入 |
+| **サーバー管理者** | `管理者` / `メンバーをBAN` 権限保有者、または `/watch config ban` で指定した **監視管理者ロール** 保有者 | 監視対象の登録・解除、各種設定変更、手動スコア調整、BAN解除＆再招待、処刑キャンセル、AIルール/フィードバック登録、チケット発行/承認/取消、投票中止 |
+| **一般メンバー** | サーバー内の全メンバー | 専用チャンネルの閲覧、グラフ表示・期間切替・違反ログ確認、BAN投票の発議・投票、自身が保有する処刑チケットの確認・行使 |
+
+> **身内サーバー向けの安全ルール（自己保護ガード）**:
+> 監視対象者本人が管理者権限を持っている場合でも、**自分自身の違反度を減らす・監視解除する・許容ルールを足す・自分への投票や処刑をキャンセルする・自分のチケット提案を却下する** といった操作は自動でブロックされます（どうしても介入が必要な場合のみ Bot オーナーが実行できます）。
+
+---
+
+## 2. AI API キーの発行手順（GCP クレジット対応）
+
+AI による自動違反判定には **Gemini API** を使用します。GCP クレジットを利用する手順は以下の2通り（＋組織アカウント向け1通り）から選べます。
+
+> **⚠️ 重要（2026年5月以降の仕様）**:
+> セキュリティ強化により、**API 制限が設定されていない標準 API キーからのリクエストは拒否**されます。Google Cloud コンソールで作成する場合は必ず「API の制限」を設定してください（Google AI Studio 経由なら自動で制限付きの Authorization Key になります）。
+
+### 方法 A: Google AI Studio に GCP プロジェクトを紐づけて発行（おすすめ・最も手軽）
+
+Google AI Studio の有料枠も裏側では同じ Google Cloud 請求アカウント（GCP クレジット）を消費します。自動で安全なキー（Auth Key）になるため設定ミスが起きにくく、利用ログや料金確認も見やすいため推奨です。
+
+1. **[Google AI Studio](https://aistudio.google.com/)** に GCP と同じ Google アカウントでログインします。
+2. 左メニュー **Dashboard → Projects** を開きます。
+3. **[Import projects]** をクリックし、GCP クレジットの請求アカウントが紐づいている Google Cloud プロジェクトを検索・選択して **[Import]** します。
+   - 請求が未設定の場合は、同画面の **Set up billing** から請求アカウントを紐づけます。
+4. 左メニュー **Dashboard → API Keys**（`https://aistudio.google.com/apikey`）を開きます。
+5. **[Create API key]** をクリックし、手順 3 でインポートしたプロジェクトを選んでキーを作成・コピーします。
+6. Easypanel では **`AI_PROVIDER=gemini_api`** として設定します（次章参照）。
+
+### 方法 B: Google Cloud コンソール（Gemini Enterprise Agent Platform / Gemini Platform）で発行
+
+GCP コンソール側で一元管理したい場合の手順です（旧「Vertex AI」は **Gemini Enterprise Agent Platform / Gemini Platform** へ名称変更されています）。
+
+1. **[Google Cloud コンソール](https://console.cloud.google.com/)** を開き、上部のプロジェクト選択から **GCP クレジットのある請求アカウントが紐づいたプロジェクト** を選択します（未紐付けなら左メニュー **お支払い** からリンク）。
+2. 左メニュー **API とサービス → ライブラリ** を開き、**`Gemini Enterprise Agent Platform API`**（または内部名 **`Vertex AI API`** / `aiplatform.googleapis.com`）を検索して **[有効にする]** をクリックします。
+   - ※ 個人 Google アカウント（`@gmail.com`）で **Gemini Enterprise Agent Platform → Express mode** を開いた場合は、オンボード画面から専用 API キーを自動発行することもできます。
+3. 左メニュー **API とサービス → 認証情報** を開きます。
+4. 上部の **[+ 認証情報を作成]** → **[API キー]** をクリックし、生成されたキーをコピーします。
+5. 作成ダイアログの **[API キーを編集]**（または一覧から作成したキー）を開き、**API の制限 → [キーを制限]** を選択します。
+6. ドロップダウンで **`Gemini Enterprise Agent Platform API`**（または **`Vertex AI API`**）にチェックを入れて **[OK]** → **[保存]** をクリックします。
+7. Easypanel では **`AI_PROVIDER=enterprise`** として設定します。
+
+### 方法 C: サービスアカウント JSON を使う（組織ポリシーで API キー作成不可の場合）
+
+Google Workspace 等の組織ポリシーで API キーの作成が制限されている場合は、サービスアカウントを使用します。
+
+1. 上記 方法 B の手順 1〜2 と同様に API を有効化します。
+2. 左メニュー **IAM と管理 → サービスアカウント → [+ サービスアカウントを作成]** でアカウントを作成し、ロール **`Vertex AI ユーザー (roles/aiplatform.user)`** を付与します。
+3. 作成したアカウントの **キー → 鍵を追加 → 新しい鍵を作成 → JSON** で JSON ファイルをダウンロードします。
+4. 次章の **Easypanel File Mount** でコンテナ内へ配置します。
+
+---
+
+## 3. Easypanel でのデプロイ・環境変数設定
+
+### 3.1 サービス構成
+- **App サービス**: Source に GitHub リポジトリ、Build に **Dockerfile** を指定
+- **MySQL サービス**: Easypanel 上の MySQL を用意（テーブル `guild_features` / `watch_*` は Bot 起動時に自動作成されます）
+
+### 3.2 環境変数（Environment タブ）
+
+#### 既存 Bot 基本設定
+```env
+DB_URL=jdbc:mysql://<MySQLサービス内部ホスト>:3306/<DB名>?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Tokyo
+DB_USER=<MySQLユーザー>
+DB_PASSWORD=<MySQLパスワード>
+DISCORD_TOKEN=<Discord Botトークン>
+DISCORD_OWNER_ID=<BotオーナーのDiscordユーザーID>
+RVC_API_BASE_URL=<RVC APIのURL>
+SWITCHBOT_MAC_ADDRESS=<SwitchBotのMACアドレス>
+TZ=Asia/Tokyo
+```
+> **ポイント**: 遺言や発言ログに日本語・絵文字が含まれるため、`DB_URL` には `useUnicode=true&characterEncoding=utf8mb4` を必ず含めてください。
+
+#### AI 判定設定（2章で選んだ方式に合わせて1つ設定）
+
+- **方法 A（Google AI Studio / 推奨）**:
+```env
+AI_PROVIDER=gemini_api
+AI_MODEL=gemini-4-hydrogen
+GOOGLE_API_KEY=<AI Studioで発行したAPIキー>
+```
+
+- **方法 B（Gemini Platform / Express Mode API キー）**:
+```env
+AI_PROVIDER=enterprise
+AI_MODEL=gemini-4-hydrogen
+GOOGLE_API_KEY=<GCPコンソールで発行したAPIキー>
+GCP_PROJECT_ID=<GCPプロジェクトID>
+GCP_LOCATION=global
+```
+
+- **方法 C（Gemini Platform / サービスアカウント JSON）**:
+```env
+AI_PROVIDER=enterprise
+AI_MODEL=gemini-4-hydrogen
+GCP_PROJECT_ID=<GCPプロジェクトID>
+GCP_LOCATION=global
+GOOGLE_APPLICATION_CREDENTIALS=/usr/app/gcp-sa.json
+```
+  ※ さらに Easypanel の **Mounts タブ → Add Mount → File Mount** で以下を追加：
+  - **Mount Path**: `/usr/app/gcp-sa.json`
+  - **Content**: ダウンロードしたサービスアカウント JSON の中身をそのまま貼り付け
+
+#### モデルの選び方（`AI_MODEL`）
+| モデルID | 特徴 | おすすめ用途 |
+| :--- | :--- | :--- |
+| `gemini-4-hydrogen`（デフォルト） | 高速かつ文脈・ニュアンス理解のバランスが優秀 | 通常運用（身内ノリと本気の暴言の判別に強い） |
+| `gemini-3.5-flash-lite` | 超高速・最低コスト | 発言量が非常に多いサーバーでクレジット消費を抑えたい場合 |
+
+### 3.3 デプロイ前のチェック項目（日本語フォント・ビルドメモリ）
+1. **日本語フォント（文字化け対策）**
+   - [Dockerfile](../Dockerfile) のビルド時に公式の Noto Sans CJK JP（Regular / Bold）を `/usr/app/fonts/` とシステムフォントへ自動導入するよう設定済みのため、Easypanel 上での追加作業は不要です。
+   - 任意のフォントに差し替えたい場合は、`src/main/resources/fonts/NotoSansJP-Regular.ttf`（または `.otf`）および `NotoSansJP-Bold.ttf`（または `.otf`）を配置するとそちらが優先されます。
+2. **Gradle ビルド時のメモリ**
+   - `gradle.properties` で `-Xmx4g` が指定されています。Easypanel を動かしている VPS のメモリが 4GB 以下の場合はビルド時に OOM で失敗することがあるため、スワップ領域を確保するか `gradle.properties` のヒープサイズを調整してください。
+
+---
+
+## 4. Discord 側の初期セットアップ手順
+
+Bot の起動ログに `正常に動作しています。` および `違反度時間減衰スケジューラを開始しました` が出たら、Discord サーバー上で以下の順にセットアップします。
+
+### Step 1: Bot の権限とロール順位を確認する（超重要）
+Discord のサーバー設定 → **ロール** で以下を確認します。
+- Bot に以下の権限があること：
+  - `メンバーをBAN`（BAN 執行・解除に必須）
+  - `ロールの管理`（再参加時のロール復元に必須）
+  - `招待を作成`（再招待リンク自動発行に必須）
+  - `チャンネルを見る` / `メッセージを送信` / `メッセージ履歴を読む` / `ファイルを添付`
+- **Bot のロール順位が、監視対象メンバーおよび復元したいロールすべてより上にあること**
+  - Discord の仕様上、サーバーオーナーや Bot より上位ロールを持つメンバーは BAN できません。また、Bot より上位のロールは再参加時に復元できません。
+
+### Step 2: サーバーで機能を有効化する（Bot オーナー）
+対象サーバー内で以下を実行します（他サーバーを指定する場合は `guild_id` オプションを使用）。
+```text
+/mod feature enable feature:watch_system
+```
+無効化したい場合は `/mod feature disable feature:watch_system`、有効化済みサーバーの確認は `/mod feature list` を使用します。
+
+### Step 3: 専用チャンネルを設定する（サーバー管理者）
+まず、誰でも違反状況を確認できるテキストチャンネル（例: `#監視モニター`）を作成し、デフォルト専用チャンネルとして登録します。
+```text
+/watch config channel default_channel:#監視モニター
+```
+- AI が処刑チケット発行を提案した際の通知先を別チャンネル（管理者専用チャンネル等）に分けたい場合：
+  ```text
+  /watch config channel approval_channel:#管理者承認
+  ```
+- AI 監視から除外したい雑談チャンネル・作業チャンネルがある場合（トグル式で追加／解除）：
+  ```text
+  /watch config channel toggle_exclude:#雑談-除外
+  ```
+  ※ 専用チャンネル自身と承認チャンネルは自動で AI 監視から除外されます。
+
+### Step 4: 監視対象メンバーを登録する（サーバー管理者）
+```text
+/watch target add user:@T氏
+```
+- **監視対象ごとに専用チャンネルを分けたい場合**:
+  ```text
+  /watch target add user:@T氏 channel:#T氏監視部屋
+  ```
+- **AI 判定用の特徴メモを添えたい場合（任意・後から同コマンドで上書き可能）**:
+  ```text
+  /watch target add user:@T氏 note:普段の「草」「雑魚ｗ」程度のゲーム煽りは身内ノリ。負けた後に味方へ本気で責任転嫁や人格否定を始めたときが問題。
+  ```
+登録すると、指定された専用チャンネルにプログレスバー付きのステータスカード（1対象につき1メッセージ）が投稿されます。
+
+### Step 5: 各種ルール（猶予時間・減衰・投票・AI）を好みに調整する
+現在の設定一覧はいつでも `/watch config show` で確認できます。
+
+| 設定コマンド | 主なオプションとデフォルト値 |
+| :--- | :--- |
+| `/watch config ban` | `grace_seconds`: 遺言猶予時間（デフォルト `60` 秒 / `0` で即時BAN）<br>`manager_role`: 監視管理コマンドを使える追加ロール<br>`vote_last_words`: 投票可決時に遺言を挟むか（デフォルト `true`）<br>`ticket_last_words`: チケット行使時に遺言を挟むか（デフォルト `true`） |
+| `/watch config ai` | `enabled`: AI自動判定 ON/OFF（デフォルト `true`）<br>`sensitivity`: 違反スコア倍率（`0.2`〜`3.0`、デフォルト `1.0`）<br>`max_delta`: 1評価あたりの最大加算上限（デフォルト `25.0`%）<br>`ticket_mode`: AI処刑チケット提案（`APPROVAL` 管理者承認制[推奨] / `AUTO` 自動発行 / `OFF` 無効） |
+| `/watch config decay` | `enabled`: 時間減衰 ON/OFF（デフォルト `true`）<br>`grace_hours`: 最終違反から減衰開始までの無違反時間（デフォルト `24` 時間）<br>`interval_hours`: 減衰間隔（デフォルト `6` 時間）<br>`amount`: 1回の基本減衰量（デフォルト `2.0`%）<br>`calm_bonus`: 前週比で違反量が半減以下のときのボーナス倍率（デフォルト `1.5` 倍） |
+| `/watch config vote` | `enabled`: 投票BAN ON/OFF（デフォルト `true`）<br>`duration_minutes`: 投票受付時間（デフォルト `15` 分）<br>`min_yes`: 可決に必要な最低賛成票（デフォルト `3` 票）<br>`pass_ratio`: 可決に必要な賛成率（デフォルト `0.6` = 60%）<br>`cooldown_minutes`: 否決後の再発議クールダウン（デフォルト `360` 分） |
+
+---
+
+## 5. 日常運用ガイド
+
+### 5.1 ステータスカード・グラフ・違反ログ
+- **プログレスバー（1対象・1サイクルにつき1メッセージ）**:
+  - スコア変動（AI検知・手動調整・時間減衰）のたびに **同じメッセージが編集更新** され、0%（緑）→ 40%（黄）→ 70%（橙）→ 90%（赤）→ 100%（深紅）へ連続的に色が変化します。
+- **📊 グラフを見る ボタン**:
+  - 押した本人にのみ見える一時メッセージ（Ephemeral）で過去1週間の推移グラフを表示します。
+  - 一時メッセージ内の **`1日` / `1週間` / `1ヶ月` / `累計`** ボタンで期間を切り替えられます。
+- **📋 違反ログ ボタン**:
+  - 直近のスコア変動履歴と発言抜粋、**イベントID（`#番号`）** を一時メッセージで確認できます。この `#番号` は後述の AI フィードバック登録に使います。
+
+### 5.2 手動スコア調整・処刑キャンセル・監視解除
+- 手動で違反度を増減する（AI が見逃した問題行動への手動ペナルティや、誤爆の帳消しなど）：
+  ```text
+  /watch score adjust user:@T氏 delta:15 reason:VCで暴言を吐いたため
+  ```
+- 遺言待機中（`PENDING_BAN`）に「やっぱり今回は許す」と中止したい場合：
+  ```text
+  /watch cancel-ban user:@T氏
+  ```
+- 監視対象から外す（過去の履歴グラフは保持されます）：
+  ```text
+  /watch target remove user:@T氏
+  ```
+
+### 5.3 BAN 執行〜BAN 解除＆再招待〜ロール復元
+1. **100%到達 / 投票可決 / チケット行使** により遺言フェーズへ入ると、専用チャンネルで対象メンバーにメンションが飛びます。
+2. 対象メンバーが専用チャンネルで **遺言を発言した瞬間**、または **猶予時間のタイムアウト時** に：
+   - 現在のロール一覧とニックネームを DB に自動退避
+   - 旧ステータスカードを「BAN執行済み（遺言掲載）」に更新して凍結
+   - メッセージ削除日数 0 日（履歴・遺言を残す設定）で BAN 実行
+3. **BAN 解除＆再招待（サーバー管理者）**:
+   ```text
+   /watch unban user_id:<補完候補から選択、またはユーザーIDを入力>
+   ```
+   - Bot が BAN を解除し、**1回限り・24時間有効の招待リンク** を発行して対象メンバーへ DM 送信します。
+   - 対象メンバーが Bot からの DM を拒否している場合、コマンド実行者の一時メッセージに招待リンクが表示されるので、別経路で渡してください。
+   - **どの招待リンク（他の人が作った招待リンク含む）から再参加しても同じように自動復元が動きます。**
+4. **再参加時**:
+   - 退避していたロール（Bot より下位かつ管理ロール以外）とニックネームを自動復元し、復元できたロール／できなかったロールを専用チャンネルへ報告します。
+   - 過去サイクルの遺言・記録をきれいに残すため、**新しいステータスカードメッセージが新規投稿** され、違反度 `0.0%` の新サイクルが始まります。
+
+### 5.4 メンバー投票 BAN（`/voteban`）
+- 発議（監視対象本人以外）: `/voteban start user:@T氏 reason:<理由>`
+  - 専用チャンネルに賛成／反対ボタン付きの投票カードが投稿されます（発議者は自動で賛成1票）。
+  - 監視対象本人は投票できません。1人1票（締切まで変更可能）。
+- 進行中の確認: `/voteban status`
+- 管理者による強制中止: `/voteban cancel vote_id:<投票ID>`
+
+### 5.5 処刑チケット（`/ticket`）
+監視対象メンバーから特にひどい被害を受けたメンバーに「いつでも BAN できるチケット」を配布する仕組みです。
+- **手動発行（管理者）**:
+  ```text
+  /ticket issue holder:@被害者 target:@T氏 reason:度を超えた暴言を受けたため expires_days:30
+  ```
+  ※ `expires_days` を省略すると無期限になります。
+- **AI による自動提案**:
+  - `ticket_mode=APPROVAL`（デフォルト）の場合、AI が特定メンバーへの深刻な攻撃を検知すると承認チャンネルに `[✅ チケット発行を承認] [❌ 却下]` ボタン付きで通知されます。管理者が承認すると被害者へ配布されます。
+- **保有チケットの確認・行使（被害者本人）**:
+  - `/ticket list` で保有チケットと行使ボタンを表示（`/ticket use ticket_id:<ID>` でも可）。
+  - 誤爆防止の **最終確認ダイアログ** で確定を押すと、チケットが消費されて処刑手続きが始まります。
+- **管理者による全チケット確認・取消**:
+  - `/ticket list all:true` / `/ticket revoke ticket_id:<ID>`
+
+---
+
+## 6. AI 判定のチューニング運用ガイド
+
+身内サーバーでは「世間一般では暴言に見える身内ノリ」と「本当に不快な言動」の線引きがサーバーごとに異なります。最初の 1〜2 週間ほど以下のサイクルを回すと判定精度が一気に安定します。
+
+### ステップ 1: サーバー固有ルールを登録する（即効性◎）
+```text
+# 許容ルール（誤爆を減らす）
+/watch ai rule-add type:ALLOW description:「雑魚ｗ」「草」「戦犯」などゲーム中の軽い掛け合いは許容する
+
+# NGルール（見逃しを減らす）
+/watch ai rule-add type:VIOLATION weight:HIGH description:他メンバーの現実の容姿・学歴・仕事に対する人格否定は重く判定する
+```
+- ルール一覧確認: `/watch ai rule-list`
+- ルール削除: `/watch ai rule-remove rule_id:<ID>`
+- `user` オプションを指定すれば、特定の監視対象専用のルールも作れます。
+
+### ステップ 2: 誤判定・見逃しをフィードバック登録する（Few-shot 学習）
+ステータスカードの **📋 違反ログ** でイベント番号（例: `#42`）を確認し、管理者が評価を登録します。
+```text
+# 誤爆だった場合（現在スコアも同時に帳消し補正）
+/watch ai feedback event_id:42 verdict:FALSE_POSITIVE expected_delta:0 note:これはアニメの台詞の引用で身内ネタなのでセーフ apply_diff:true
+
+# AIが見逃した発言を学習させる場合
+/watch ai feedback verdict:MISSED expected_delta:12 user:@T氏 message_text:お前本当に頭悪いな note:ストレートな人格否定なので中〜重度の違反として扱う
+```
+登録されたフィードバックは、次回以降の AI 推論時に **Few-shot 事例（最新 12 件・対象者専用を優先）** としてプロンプトに自動注入されます。
+
+### ステップ 3: 全体の厳しさを微調整する
+- 全体的にスコアの溜まり方が早すぎる／遅すぎる場合は `/watch config ai sensitivity:0.7`（または `1.3` 等）で全体倍率を調整します。
+- 1回の発言で一気に BAN まで飛ぶのを防ぎたい場合は `max_delta:15` のように上限を下げます。
+
+---
+
+## 7. トラブルシューティング
+
+| 症状 | 主な原因と対処法 |
+| :--- | :--- |
+| **コマンドを実行すると「機能が無効です」と出る** | Bot オーナーが `/mod feature enable feature:watch_system` をそのサーバーで実行していません。 |
+| **監視対象が発言しても AI が反応しない** | 以下を確認してください：<br>1. `GOOGLE_API_KEY`（または GCP 認証）が設定されているか（起動ログに警告が出ます）<br>2. Google Cloud コンソール作成の API キーに **API 制限** が付いているか<br>3. 専用チャンネルや除外チャンネルで発言していないか<br>4. 添付・スタンプなしの「2文字以下の短文」「URLのみ」は自動除外されます（画像・音声・動画・PDF等の添付がある発言はテキストなしでも審査対象になります）<br>5. 連投をまとめるため、発言から判定まで **5〜10秒** のバッファがあります |
+| **大きい添付ファイルが審査されない** | メモリ・API負荷保護のため、インライン解析の上限は **1ファイル 8MB まで／1バッチ最大 4 件（合計 15MB まで）** です。対応形式は画像（PNG/JPEG/WebP/GIF）・音声（MP3/WAV/OGG/M4A/AAC/FLAC）・動画（MP4/WebM/MOV）・PDF・テキスト（TXT）です。上限超過や未対応形式はファイル名等のメタ情報のみ AI に渡されます。 |
+| **100% 到達しても BAN に失敗する** | Bot に `メンバーをBAN` 権限があるか、また **Bot のロール順位が対象メンバーより上** か確認してください（サーバーオーナーは Discord 仕様上 BAN 不可です）。 |
+| **再参加時に一部ロールが戻らない** | Bot より上位のロール、ブースターロールや他 Bot の管理ロール（`isManaged`）、または削除済みロールは復元できません（復元できなかった一覧は専用チャンネルに報告されます）。 |
+| **プログレスバーやグラフの日本語が空白／`□□□` になる** | コンテナに日本語フォントが入っていない状態で起動しています。最新の [Dockerfile](../Dockerfile) で再ビルド・再デプロイしてください（起動ログに `外部日本語フォントを読み込みました` が出れば正常です）。 |
+| **遺言待機中や投票中に Bot が再起動した** | 状態と期限は MySQL に永続化されているため、起動完了時（`ReadyEvent`）に残り時間のタイマーが自動復元されます（再起動中に期限を過ぎていた場合は起動直後に執行・集計されます）。 |
+| **対象者が DM 拒否で招待リンクが届かない** | `/watch unban` 実行時に管理者へ Ephemeral（本人限定表示）で招待リンクが表示されるため、それをコピーして別経路で渡してください。他メンバーが作った招待リンクから再参加してもロール復元は正常に動きます。 |

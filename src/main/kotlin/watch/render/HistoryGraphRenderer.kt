@@ -4,6 +4,7 @@ import jp.simplespace.db.WatchScoreEvent
 import jp.simplespace.db.WatchScoreEventType
 import java.awt.BasicStroke
 import java.awt.Color
+import java.awt.FontMetrics
 import java.awt.GradientPaint
 import java.awt.RenderingHints
 import java.awt.geom.Path2D
@@ -67,15 +68,16 @@ object HistoryGraphRenderer {
             val plotW = WIDTH - padLeft - padRight
             val plotH = HEIGHT - padTop - padBottom
 
-            // タイトル
-            g.font = FontLoader.bold(22f)
-            g.color = TEXT_PRIMARY
-            val safeName = if (displayName.length > 24) displayName.take(23) + "…" else displayName
-            g.drawString("違反度推移グラフ - $safeName (${range.label})", padLeft, 36)
-
-            // 凡例
+            // 凡例（右端基準で動的配置して幅を取得）
             g.font = FontLoader.regular(13f)
-            drawLegend(g, WIDTH - padRight - 280, 24)
+            val legendStartX = drawLegendRightAligned(g, WIDTH - padRight, 24)
+
+            // タイトル（凡例と被らない幅でトリミング）
+            g.font = FontLoader.bold(20f)
+            g.color = TEXT_PRIMARY
+            val fullTitle = "違反度推移グラフ - $displayName (${range.label})"
+            val maxTitleW = (legendStartX - padLeft - 16).coerceAtLeast(180)
+            g.drawString(ellipsizeToWidth(fullTitle, g.fontMetrics, maxTitleW), padLeft, 36)
 
             // プロット背景
             g.color = PLOT_BG
@@ -110,19 +112,15 @@ object HistoryGraphRenderer {
             // 時間範囲の決定
             val startMillis = when {
                 range.durationMillis != null -> nowMillis - range.durationMillis
-                events.isNotEmpty() -> (events.first().createdAt - 3600_000L).coerceAtMost(nowMillis - 3600_000L)
+                events.isNotEmpty() -> (events.first().createdAt - 30L * 60_000L).coerceAtMost(nowMillis - 30L * 60_000L)
                 else -> nowMillis - 7L * 24L * 3600_000L
             }
             val endMillis = nowMillis.coerceAtLeast(startMillis + 60_000L)
             val spanMillis = (endMillis - startMillis).toDouble()
 
-            // X軸グリッドとラベル
+            // X軸グリッドとラベル（期間長に応じて自動フォーマット）
             val tickCount = 5
-            val formatter = when (range) {
-                GraphRange.DAY_1 -> DateTimeFormatter.ofPattern("HH:mm", Locale.JAPAN)
-                GraphRange.WEEK_1, GraphRange.MONTH_1 -> DateTimeFormatter.ofPattern("MM/dd", Locale.JAPAN)
-                GraphRange.ALL -> DateTimeFormatter.ofPattern("yy/MM/dd", Locale.JAPAN)
-            }
+            val formatter = chooseAxisFormatter(range, spanMillis.toLong())
             g.stroke = BasicStroke(1f)
             for (i in 0..tickCount) {
                 val ratio = i.toDouble() / tickCount
@@ -217,19 +215,49 @@ object HistoryGraphRenderer {
         return baos.toByteArray()
     }
 
-    private fun drawLegend(g: java.awt.Graphics2D, startX: Int, y: Int) {
+    private fun chooseAxisFormatter(range: GraphRange, spanMillis: Long): DateTimeFormatter {
+        val hours = spanMillis / 3600_000L
+        return when {
+            range == GraphRange.DAY_1 || hours <= 24L -> DateTimeFormatter.ofPattern("HH:mm", Locale.JAPAN)
+            hours <= 72L -> DateTimeFormatter.ofPattern("MM/dd HH:mm", Locale.JAPAN)
+            hours <= 60L * 24L -> DateTimeFormatter.ofPattern("MM/dd", Locale.JAPAN)
+            else -> DateTimeFormatter.ofPattern("yy/MM/dd", Locale.JAPAN)
+        }
+    }
+
+    private fun drawLegendRightAligned(g: java.awt.Graphics2D, rightX: Int, y: Int): Int {
         val items = listOf(
             VIOLATION_DOT to "違反加算",
             DECAY_DOT to "減衰回復",
             MANUAL_DOT to "手動調整",
         )
+        val fm = g.fontMetrics
+        val gap = 18
+        val dotSize = 10
+        val dotLabelGap = 6
+        val totalWidth = items.sumOf { dotSize + dotLabelGap + fm.stringWidth(it.second) } + gap * (items.size - 1)
+        val startX = rightX - totalWidth
         var x = startX
         items.forEach { (color, label) ->
             g.color = color
-            g.fillOval(x, y, 10, 10)
+            g.fillOval(x, y, dotSize, dotSize)
             g.color = TEXT_MUTED
-            g.drawString(label, x + 15, y + 10)
-            x += 92
+            g.drawString(label, x + dotSize + dotLabelGap, y + 10)
+            x += dotSize + dotLabelGap + fm.stringWidth(label) + gap
         }
+        return startX
+    }
+
+    private fun ellipsizeToWidth(text: String, fm: FontMetrics, maxWidth: Int): String {
+        if (maxWidth <= 0) return ""
+        if (fm.stringWidth(text) <= maxWidth) return text
+        val ellipsis = "…"
+        val ellipsisW = fm.stringWidth(ellipsis)
+        val sb = StringBuilder()
+        for (ch in text) {
+            if (fm.stringWidth(sb.toString() + ch) + ellipsisW > maxWidth) break
+            sb.append(ch)
+        }
+        return sb.toString() + ellipsis
     }
 }

@@ -14,6 +14,16 @@ data class ContextMessage(
     val timestampEpochSec: Long,
 )
 
+data class ModerationAttachment(
+    val fileName: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val bytes: ByteArray? = null,
+    val skippedReason: String? = null,
+) {
+    val hasInlineData: Boolean get() = bytes != null && bytes.isNotEmpty()
+}
+
 data class ModerationEvaluationRequest(
     val guildName: String,
     val channelName: String,
@@ -24,6 +34,7 @@ data class ModerationEvaluationRequest(
     val feedbacks: List<WatchAiFeedback>,
     val contextMessages: List<ContextMessage>,
     val targetMessages: List<String>,
+    val attachments: List<ModerationAttachment> = emptyList(),
 )
 
 @Serializable

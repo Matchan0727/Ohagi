@@ -10,6 +10,7 @@ object ModerationPromptBuilder {
 【重要な前提】
 - 身内サーバーのため、軽い冗談・ゲーム中の一般的な掛け合い・周囲も乗っているボケ/ツッコミは過度に違反としないでください。
 - サーバー固有の「違反ルール (NG傾向)」「許容ルール (身内ネタ等)」および「過去のフィードバック修正事例」が提供された場合は、それを最優先で基準にしてください。
+- **添付ファイル（画像・GIF・音声・動画・PDF・スタンプ等）が一緒に渡された場合**は、テキストだけでなくメディア内容も必ず審査してください（例：画像内の暴言・煽り文字、他メンバーを晒すスクリーンショット、グロ・不快・露骨なNSFW画像、悪質なコラ画像や嫌がらせ画像など）。通常のゲームスクショ・ネタミーム・無害な画像は違反としないでください。
 
 【base_delta（違反スコア基準値: 0.0〜25.0）】
 - 0.0 (NONE): 問題なし、または身内ノリの許容範囲
@@ -82,6 +83,19 @@ object ModerationPromptBuilder {
         appendLine("## 今回評価する監視対象ユーザーの発言")
         request.targetMessages.forEachIndexed { i, text ->
             appendLine("${i + 1}. $text")
+        }
+
+        if (request.attachments.isNotEmpty()) {
+            appendLine()
+            appendLine("## 添付ファイル一覧")
+            request.attachments.forEachIndexed { idx, att ->
+                val state = when {
+                    att.hasInlineData -> "メディアデータを添付済み（内容を審査してください）"
+                    !att.skippedReason.isNullOrBlank() -> "未解析: ${att.skippedReason}"
+                    else -> "メタ情報のみ"
+                }
+                appendLine("${idx + 1}. ${att.fileName} (${att.mimeType}, ${att.sizeBytes} bytes) - $state")
+            }
         }
     }
 }
