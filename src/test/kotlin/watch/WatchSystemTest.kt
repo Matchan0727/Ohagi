@@ -21,6 +21,7 @@ import jp.simplespace.db.WatchBanTicket
 import jp.simplespace.db.WatchCycle
 import jp.simplespace.db.WatchCycleStatus
 import jp.simplespace.db.WatchGuildConfig
+import jp.simplespace.db.WatchRoleCounter
 import jp.simplespace.db.WatchScoreEvent
 import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.db.WatchVoteTally
@@ -480,5 +481,29 @@ class WatchSystemTest {
 
         // パブリックIPは許可
         assertTrue(UrlImageFetcher.isPublicSafeAddress(java.net.InetAddress.getByName("8.8.8.8")))
+    }
+
+    @Test
+    fun testRoleCounterInferenceAndIncrement() {
+        val inferred = WatchRoleCounter.inferFromRoleName("sasalive 9期生")
+        assertNotNull(inferred)
+        assertEquals("sasalive {n}期生", inferred.first)
+        assertEquals(9, inferred.second)
+
+        val counter = WatchRoleCounter(
+            id = 1, guildId = "g1", targetId = 1, roleId = "r1",
+            nameTemplate = inferred.first, currentNumber = inferred.second, step = 1, updatedAt = 0L,
+        )
+        assertEquals("sasalive 9期生", counter.renderName())
+        assertEquals("sasalive 10期生", counter.renderName(counter.nextNumber()))
+
+        // 複数数値がある場合は末尾の数値を採用
+        val multi = WatchRoleCounter.inferFromRoleName("2026年 sasalive 9期生")
+        assertNotNull(multi)
+        assertEquals("2026年 sasalive {n}期生", multi.first)
+        assertEquals(9, multi.second)
+
+        // 数値が無いロール名は null
+        assertEquals(null, WatchRoleCounter.inferFromRoleName("一般メンバー"))
     }
 }

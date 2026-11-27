@@ -7,6 +7,7 @@ import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.WatchAiRule
+import jp.simplespace.db.WatchRoleCounter
 import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
@@ -60,6 +61,10 @@ class WatchCommand : SlashCommand() {
             WatchAiRuleEditSub(),
             WatchAiRuleRemoveSub(),
             WatchAiFeedbackSub(),
+            // role-counter グループ
+            WatchRoleCounterSetSub(),
+            WatchRoleCounterListSub(),
+            WatchRoleCounterRemoveSub(),
             // 直下コマンド
             WatchUnbanSub(),
             WatchCancelBanSub(),
@@ -74,6 +79,7 @@ private fun targetGroup() = SubcommandGroupData("target", "監視対象メンバ
 private fun configGroup() = SubcommandGroupData("config", "サーバー単位の監視設定を管理します")
 private fun scoreGroup() = SubcommandGroupData("score", "違反度スコアを操作します")
 private fun aiGroup() = SubcommandGroupData("ai", "AI判定ルールとフィードバックを管理します")
+private fun roleCounterGroup() = SubcommandGroupData("role-counter", "BAN再参加時のロール名自動カウント更新を管理します")
 
 private class WatchTargetAddSub : SlashCommand() {
     init {
@@ -1006,6 +1012,162 @@ private class WatchRefreshSub : SlashCommand() {
                     simpleTitleAndDescriptionContainer("🔄 ステータスカードを再配置しました", desc, Color(0x2E, 0xCC, 0x71))
                 ).setAllowedMentions(emptyList()).useComponentsV2().queue()
             }
+        }
+    }
+}
+
+private class WatchRoleCounterSetSub : SlashCommand() {
+    init {
+        name = "set"
+        help = "BAN再参加時にロール名の数値を自動カウントアップする設定を登録します（例: sasalive 9期生 → 10期生）。"
+        subcommandGroup = roleCounterGroup()
+        options = listOf(
+            OptionData(OptionType.USER, "user", "対象の監視メンバー", true),
+            OptionData(OptionType.ROLE, "role", "名称を自動更新するロール", true),
+            OptionData(OptionType.STRING, "template", "ロール名テンプレート（{n}が数値に置換。省略時は現在のロール名から自動推定）", false),
+            OptionData(OptionType.INTEGER, "current_number", "現在の数値（省略時は現在のロール名から自動推定）", false),
+            OptionData(OptionType.INTEGER, "step", "1回のBAN再参加ごとの増加量（デフォルト: 1）", false)
+                .setRequiredRange(1, 100),
+        )
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val targetUser = event.getOption("user")?.asUser ?: return
+        val role = event.getOption("role")?.asRole ?: return
+        val target = watchConfigService.getTarget(guild.id, targetUser.id, activeOnly = false)
+        if (target == null) {
+            replyEph(event, "対象外", "<@${targetUser.id}> は監視対象として登録されていません。先に `/watch target add` を実行してください。", Color.RED)
+            return
+        }
+
+        val inferred = WatchRoleCounter.inferFromRoleName(role.name)
+        val template = event.optString("template")?.trim()?.takeIf { it.isNotEmpty() } ?: inferred?.first
+        val currentNum = event.getOption("current_number")?.asInt ?: inferred?.second
+        val step = event.getOption("step")?.asInt ?: 1
+
+        if (template == null || currentNum == null) {
+            replyEph(
+                event,
+                "自動推定できませんでした",
+                "ロール名 `${role.name}` に数値が含まれていないため自動推定できませんでした。\n" +
+                    "`template`（例: `sasalive {n}期生`）と `current_number`（例: `9`）を指定して実行してください。",
+                Color.RED,
+            )
+            return
+        }
+        if (!template.contains(WatchRoleCounter.PLACEHOLDER)) {
+            replyEph(
+                event,
+                "入力エラー",
+                "`template` には数値の埋め込み箇所として `${WatchRoleCounter.PLACEHOLDER}` を含めてください（例: `sasalive {n}期生`）。",
+                Color.RED,
+            )
+            return
+        }
+
+        val saved = watchConfigService.upsertRoleCounter(
+            guildId = guild.id,
+            targetId = target.id,
+            roleId = role.id,
+            nameTemplate = template,
+            currentNumber = currentNum,
+            step = step,
+        )
+
+        val warnings = mutableListOf<String>()
+        if (!guild.selfMember.hasPermission(net.dv8tion.jda.api.Permission.MANAGE_ROLES)) {
+            warnings += "Botに `ロールの管理 (MANAGE_ROLES)` 権限がありません。"
+        }
+        if (!guild.selfMember.canInteract(role)) {
+            warnings += "対象ロール（${role.asMention}）がBotのロールより上位にあるため名前を変更できません。Botのロール順位を上げてください。"
+        }
+
+        val desc = buildString {
+            append("<@${targetUser.id}> がBANされ再参加するたびに ${role.asMention} のロール名を自動更新します。\n\n")
+            append("- **テンプレート**: `${saved.nameTemplate}`\n")
+            append("- **現在値**: `${saved.currentNumber}`（現在名イメージ: `${saved.renderName(saved.currentNumber)}`）\n")
+            append("- **次回再参加時**: **`${saved.renderName(saved.nextNumber())}`**（+${saved.step}）")
+            if (warnings.isNotEmpty()) {
+                append("\n\n⚠️ **注意**:\n${warnings.joinToString("\n")}")
+            }
+        }
+        replyEph(event, "🏷️ ロール名自動更新を設定しました", desc, Color(0x2E, 0xCC, 0x71))
+    }
+}
+
+private class WatchRoleCounterListSub : SlashCommand() {
+    init {
+        name = "list"
+        help = "登録されているBAN再参加時ロール名自動更新の一覧を表示します。"
+        subcommandGroup = roleCounterGroup()
+        options = listOf(
+            OptionData(OptionType.USER, "user", "特定の監視対象で絞り込む場合に指定", false),
+        )
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        val optUser = event.getOption("user")?.asUser
+        val counters = if (optUser != null) {
+            val target = watchConfigService.getTarget(guild.id, optUser.id, activeOnly = false)
+            if (target == null) emptyList() else watchConfigService.listRoleCountersByTarget(target.id)
+        } else {
+            watchConfigService.listRoleCountersByGuild(guild.id)
+        }
+
+        val desc = if (counters.isEmpty()) {
+            "登録されているロール名自動更新設定はありません。"
+        } else {
+            buildString {
+                counters.forEach { c ->
+                    val target = watchConfigService.getTargetById(c.targetId)
+                    append(
+                        "- 対象: <@${target?.userId ?: "不明"}> | ロール: <@&${c.roleId}>\n" +
+                            "  テンプレート: `${c.nameTemplate}` | 現在: `${c.currentNumber}` → 次回: **`${c.renderName(c.nextNumber())}`**\n"
+                    )
+                }
+            }.trim()
+        }
+        replyEph(event, "🏷️ ロール名自動更新一覧", desc, Color(0x36, 0xB8, 0xFA))
+    }
+}
+
+private class WatchRoleCounterRemoveSub : SlashCommand() {
+    init {
+        name = "remove"
+        help = "BAN再参加時のロール名自動更新設定を解除します。"
+        subcommandGroup = roleCounterGroup()
+        options = listOf(
+            OptionData(OptionType.USER, "user", "対象の監視メンバー", true),
+            OptionData(OptionType.ROLE, "role", "解除するロール", true),
+        )
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val targetUser = event.getOption("user")?.asUser ?: return
+        val role = event.getOption("role")?.asRole ?: return
+        val target = watchConfigService.getTarget(guild.id, targetUser.id, activeOnly = false)
+        if (target == null) {
+            replyEph(event, "エラー", "<@${targetUser.id}> の監視データが見つかりません。", Color.RED)
+            return
+        }
+        val removed = watchConfigService.removeRoleCounter(target.id, role.id)
+        if (removed) {
+            replyEph(event, "設定を解除しました", "<@${targetUser.id}> の ${role.asMention} ロール名自動更新を解除しました。", Color.ORANGE)
+        } else {
+            replyEph(event, "見つかりません", "該当するロール名自動更新設定は登録されていません。", Color.RED)
         }
     }
 }

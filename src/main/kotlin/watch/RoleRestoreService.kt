@@ -28,6 +28,11 @@ data class RoleRestoreReport(
     val nicknameRestored: Boolean,
 )
 
+data class RoleRenameReport(
+    val renamed: List<String>,
+    val failed: List<String>,
+)
+
 object RoleRestoreService {
     fun captureRoleSnapshot(guild: Guild, cycle: WatchCycle) {
         val member = guild.getMemberById(cycle.userId)
@@ -173,6 +178,45 @@ object RoleRestoreService {
         return RoleRestoreReport(restored, skipped, nicknameRestored)
     }
 
+    fun incrementRoleCountersForTarget(guild: Guild, targetId: Long): RoleRenameReport {
+        val counters = watchConfigService.listRoleCountersByTarget(targetId)
+        if (counters.isEmpty()) return RoleRenameReport(emptyList(), emptyList())
+
+        val renamed = mutableListOf<String>()
+        val failed = mutableListOf<String>()
+        val canManageRoles = guild.selfMember.hasPermission(Permission.MANAGE_ROLES)
+
+        for (counter in counters) {
+            val role = guild.getRoleById(counter.roleId)
+            val nextNum = counter.nextNumber()
+            val newName = counter.renderName(nextNum)
+            when {
+                role == null -> failed += "ロールID `${counter.roleId}`（削除済み）"
+                !canManageRoles -> failed += "`${role.name}`（BotにMANAGE_ROLES権限なし）"
+                role.isManaged || role.isPublicRole -> failed += "`${role.name}`（変更不可ロール）"
+                !guild.selfMember.canInteract(role) -> failed += "`${role.name}`（Botより上位ロール）"
+                else -> {
+                    val oldName = role.name
+                    val ok = runCatching {
+                        role.manager.setName(newName)
+                            .reason("Watch System: BAN後の再参加に伴うロール名自動更新")
+                            .complete()
+                        true
+                    }.onFailure {
+                        OhagiBot.logger.warn("ロール名更新に失敗しました: guild={}, roleId={}", guild.id, role.id, it)
+                    }.getOrDefault(false)
+                    if (ok) {
+                        watchConfigService.updateRoleCounterNumber(counter.id, nextNum)
+                        renamed += "`$oldName` → **`$newName`**"
+                    } else {
+                        failed += "`$oldName`（更新エラー）"
+                    }
+                }
+            }
+        }
+        return RoleRenameReport(renamed, failed)
+    }
+
     suspend fun handleMemberRejoin(guild: Guild, member: Member) {
         if (!WatchPermissions.isFeatureEnabled(guild.id)) return
         val bannedCycle = watchCycleService.findCycleByGuildUserStatus(guild.id, member.id, WatchCycleStatus.BANNED)
@@ -184,6 +228,8 @@ object RoleRestoreService {
             val latestBanned = watchCycleService.getCycleById(bannedCycle.id) ?: return@withTargetLock
             if (latestBanned.status != WatchCycleStatus.BANNED) return@withTargetLock
 
+            // BAN再参加時のロール名自動カウント更新（例: sasalive 9期生 → sasalive 10期生）
+            val renameReport = incrementRoleCountersForTarget(guild, target.id)
             val report = restoreRolesForMember(guild, member, latestBanned.id)
             val now = System.currentTimeMillis()
             watchCycleService.markArchived(latestBanned.id, rejoinedAt = now)
@@ -194,6 +240,12 @@ object RoleRestoreService {
 
             val welcomeDesc = buildString {
                 append("<@${member.id}> がサーバーに再参加しました！\n")
+                if (renameReport.renamed.isNotEmpty()) {
+                    append("\n**🏷️ ロール名更新**: ${renameReport.renamed.joinToString(", ")}")
+                }
+                if (renameReport.failed.isNotEmpty()) {
+                    append("\n**⚠️ ロール名更新失敗**: ${renameReport.failed.joinToString(", ")}")
+                }
                 if (report.restoredRoles.isNotEmpty()) {
                     append("\n**✅ 復元したロール**: ${report.restoredRoles.joinToString(", ") { "`$it`" }}")
                 }

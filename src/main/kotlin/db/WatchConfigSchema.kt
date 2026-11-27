@@ -8,6 +8,7 @@ import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.SchemaUtils
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -64,6 +65,38 @@ data class WatchTarget(
     val createdAt: Long,
 )
 
+@Serializable
+data class WatchRoleCounter(
+    val id: Long,
+    val guildId: String,
+    val targetId: Long,
+    val roleId: String,
+    val nameTemplate: String,
+    val currentNumber: Int,
+    val step: Int,
+    val updatedAt: Long,
+) {
+    fun nextNumber(): Int = currentNumber + step
+
+    fun renderName(number: Int = currentNumber): String =
+        nameTemplate.replace(PLACEHOLDER, number.toString()).take(100)
+
+    companion object {
+        const val PLACEHOLDER = "{n}"
+        private val LAST_NUMBER_REGEX = Regex("""(\d+)(?!.*\d)""")
+
+        /**
+         * 既存ロール名（例: "sasalive 9期生"）の末尾の数値からテンプレートと現在値を自動推定する。
+         */
+        fun inferFromRoleName(roleName: String): Pair<String, Int>? {
+            val match = LAST_NUMBER_REGEX.find(roleName) ?: return null
+            val num = match.value.toIntOrNull() ?: return null
+            val template = roleName.substring(0, match.range.first) + PLACEHOLDER + roleName.substring(match.range.last + 1)
+            return template to num
+        }
+    }
+}
+
 class WatchConfigService(private val database: Database) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -113,9 +146,26 @@ class WatchConfigService(private val database: Database) {
         }
     }
 
+    object WatchTargetRoleCounters : Table("watch_target_role_counters") {
+        val id = long("id").autoIncrement()
+        val guildId = varchar("guild_id", 64).index("idx_watch_role_counters_guild")
+        val targetId = long("target_id").index("idx_watch_role_counters_target")
+        val roleId = varchar("role_id", 64)
+        val nameTemplate = varchar("name_template", 120)
+        val currentNumber = integer("current_number")
+        val step = integer("step").default(1)
+        val updatedAt = long("updated_at")
+
+        override val primaryKey = PrimaryKey(id)
+
+        init {
+            uniqueIndex("uq_watch_role_counter_target_role", targetId, roleId)
+        }
+    }
+
     init {
         transaction(database) {
-            SchemaUtils.create(WatchGuildConfigs, WatchTargets)
+            SchemaUtils.create(WatchGuildConfigs, WatchTargets, WatchTargetRoleCounters)
         }
     }
 
@@ -275,6 +325,85 @@ class WatchConfigService(private val database: Database) {
         if (config.defaultChannelId == channelId || config.approvalChannelId == channelId) return true
         return listTargets(guildId, activeOnly = true).any { it.dedicatedChannelId == channelId }
     }
+
+    fun upsertRoleCounter(
+        guildId: String,
+        targetId: Long,
+        roleId: String,
+        nameTemplate: String,
+        currentNumber: Int,
+        step: Int = 1,
+    ): WatchRoleCounter = transaction(database) {
+        val now = System.currentTimeMillis()
+        val existing = WatchTargetRoleCounters.selectAll()
+            .where { (WatchTargetRoleCounters.targetId eq targetId) and (WatchTargetRoleCounters.roleId eq roleId) }
+            .singleOrNull()
+            ?.toRoleCounter()
+
+        if (existing != null) {
+            WatchTargetRoleCounters.update({ WatchTargetRoleCounters.id eq existing.id }) {
+                it[WatchTargetRoleCounters.nameTemplate] = nameTemplate.take(120)
+                it[WatchTargetRoleCounters.currentNumber] = currentNumber
+                it[WatchTargetRoleCounters.step] = step
+                it[WatchTargetRoleCounters.updatedAt] = now
+            }
+            existing.copy(
+                nameTemplate = nameTemplate.take(120),
+                currentNumber = currentNumber,
+                step = step,
+                updatedAt = now,
+            )
+        } else {
+            val id = WatchTargetRoleCounters.insert {
+                it[WatchTargetRoleCounters.guildId] = guildId
+                it[WatchTargetRoleCounters.targetId] = targetId
+                it[WatchTargetRoleCounters.roleId] = roleId
+                it[WatchTargetRoleCounters.nameTemplate] = nameTemplate.take(120)
+                it[WatchTargetRoleCounters.currentNumber] = currentNumber
+                it[WatchTargetRoleCounters.step] = step
+                it[WatchTargetRoleCounters.updatedAt] = now
+            }[WatchTargetRoleCounters.id]
+            WatchRoleCounter(id, guildId, targetId, roleId, nameTemplate.take(120), currentNumber, step, now)
+        }
+    }
+
+    fun listRoleCountersByTarget(targetId: Long): List<WatchRoleCounter> = transaction(database) {
+        WatchTargetRoleCounters.selectAll()
+            .where { WatchTargetRoleCounters.targetId eq targetId }
+            .map { it.toRoleCounter() }
+    }
+
+    fun listRoleCountersByGuild(guildId: String): List<WatchRoleCounter> = transaction(database) {
+        WatchTargetRoleCounters.selectAll()
+            .where { WatchTargetRoleCounters.guildId eq guildId }
+            .map { it.toRoleCounter() }
+    }
+
+    fun updateRoleCounterNumber(counterId: Long, newNumber: Int) {
+        transaction(database) {
+            WatchTargetRoleCounters.update({ WatchTargetRoleCounters.id eq counterId }) {
+                it[WatchTargetRoleCounters.currentNumber] = newNumber
+                it[WatchTargetRoleCounters.updatedAt] = System.currentTimeMillis()
+            }
+        }
+    }
+
+    fun removeRoleCounter(targetId: Long, roleId: String): Boolean = transaction(database) {
+        WatchTargetRoleCounters.deleteWhere {
+            (WatchTargetRoleCounters.targetId eq targetId) and (WatchTargetRoleCounters.roleId eq roleId)
+        } > 0
+    }
+
+    private fun ResultRow.toRoleCounter(): WatchRoleCounter = WatchRoleCounter(
+        id = this[WatchTargetRoleCounters.id],
+        guildId = this[WatchTargetRoleCounters.guildId],
+        targetId = this[WatchTargetRoleCounters.targetId],
+        roleId = this[WatchTargetRoleCounters.roleId],
+        nameTemplate = this[WatchTargetRoleCounters.nameTemplate],
+        currentNumber = this[WatchTargetRoleCounters.currentNumber],
+        step = this[WatchTargetRoleCounters.step],
+        updatedAt = this[WatchTargetRoleCounters.updatedAt],
+    )
 
     private fun ResultRow.toConfig(): WatchGuildConfig {
         val excluded = runCatching {
