@@ -40,9 +40,10 @@ object StatusBoardService {
         target: WatchTarget,
         cycle: WatchCycle,
         forceNewMessage: Boolean = false,
+        overrideChannelId: String? = null,
     ): String? {
         val config = watchConfigService.getOrCreateConfig(guild.id)
-        val channelId = cycle.statusChannelId ?: watchConfigService.resolveStatusChannelId(target, config)
+        val channelId = overrideChannelId ?: cycle.statusChannelId ?: watchConfigService.resolveStatusChannelId(target, config)
         if (channelId == null) {
             OhagiBot.logger.warn("専用チャンネル未設定のためステータスボードを更新できません: guild={}, target={}", guild.id, target.id)
             return null
@@ -92,6 +93,46 @@ object StatusBoardService {
         }.onFailure {
             OhagiBot.logger.error("ステータスボードの新規投稿に失敗しました: guild={}, channel={}", guild.id, channel.id, it)
         }.getOrNull()
+    }
+
+    /**
+     * 既存のステータスカードを削除し、チャンネル最下部へ最新状態で再投稿する。
+     * 遺言などの過去記録を守るため、ACTIVE / PENDING_BAN サイクルのみを対象とする。
+     */
+    fun repositionStatusBoard(
+        guild: Guild,
+        target: WatchTarget,
+        cycle: WatchCycle,
+    ): String? {
+        if (cycle.status != WatchCycleStatus.ACTIVE && cycle.status != WatchCycleStatus.PENDING_BAN) {
+            return null
+        }
+
+        // 旧メッセージの削除を試行（既に手動削除済みの場合は無視して続行）
+        val oldChannelId = cycle.statusChannelId
+        val oldMessageId = cycle.statusMessageId
+        if (!oldChannelId.isNullOrBlank() && !oldMessageId.isNullOrBlank()) {
+            val oldChannel = guild.getTextChannelById(oldChannelId)
+            if (oldChannel != null) {
+                runCatching {
+                    oldChannel.deleteMessageById(oldMessageId).complete()
+                }.onFailure { e ->
+                    if (e !is ErrorResponseException || e.errorResponse != ErrorResponse.UNKNOWN_MESSAGE) {
+                        OhagiBot.logger.warn("旧ステータスボードの削除に失敗しました: messageId={}", oldMessageId, e)
+                    }
+                }
+            }
+        }
+
+        val config = watchConfigService.getOrCreateConfig(guild.id)
+        val destChannelId = watchConfigService.resolveStatusChannelId(target, config) ?: oldChannelId
+        return upsertStatusBoard(
+            guild = guild,
+            target = target,
+            cycle = cycle,
+            forceNewMessage = true,
+            overrideChannelId = destChannelId,
+        )
     }
 
     private fun tryEditExisting(
@@ -189,6 +230,7 @@ object StatusBoardService {
         }
 
         val isActive = cycle.status == WatchCycleStatus.ACTIVE
+        val canReposition = cycle.status == WatchCycleStatus.ACTIVE || cycle.status == WatchCycleStatus.PENDING_BAN
         val globalBtn = Button.danger(
             "ticket_board_global:${target.id}",
             "🌐 全体チケット使用 (${globalTicketCount}枚)",
@@ -197,12 +239,17 @@ object StatusBoardService {
             "ticket_board_personal:${target.id}",
             "🎟️ 個人チケット使用",
         ).withDisabled(!isActive)
+        val refreshBtn = Button.secondary(
+            "watch_refresh:${target.id}",
+            "🔄 再配置",
+        ).withDisabled(!canReposition)
 
         val buttons = listOf(
             Button.primary("watch_graph:${target.id}:${GraphRange.WEEK_1.key}", "📊 グラフを見る"),
             Button.secondary("watch_logs:${target.id}:0", "📋 違反ログ"),
             globalBtn,
             personalBtn,
+            refreshBtn,
         )
 
         return Container.of(

@@ -204,6 +204,16 @@ object WatchOrchestrator {
         true
     }
 
+    suspend fun repositionTargetBoard(guild: Guild, target: WatchTarget): Boolean = withTargetLock(guild.id, target.userId) {
+        val latestTarget = watchConfigService.getTargetById(target.id) ?: return@withTargetLock false
+        if (!latestTarget.active) return@withTargetLock false
+        val cycle = latestTarget.currentCycleId?.let { watchCycleService.getCycleById(it) } ?: return@withTargetLock false
+        if (cycle.status != WatchCycleStatus.ACTIVE && cycle.status != WatchCycleStatus.PENDING_BAN) {
+            return@withTargetLock false
+        }
+        StatusBoardService.repositionStatusBoard(guild, latestTarget, cycle) != null
+    }
+
     private fun startBanFlowLocked(
         guild: Guild,
         target: WatchTarget,

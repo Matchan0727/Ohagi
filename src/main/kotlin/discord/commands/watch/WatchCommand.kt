@@ -63,6 +63,7 @@ class WatchCommand : SlashCommand() {
             // 直下コマンド
             WatchUnbanSub(),
             WatchCancelBanSub(),
+            WatchRefreshSub(),
         )
     }
 
@@ -950,6 +951,60 @@ private class WatchCancelBanSub : SlashCommand() {
                 }
                 hook.editOriginalComponents(simpleTitleAndDescriptionContainer(title, desc, color))
                     .setAllowedMentions(emptyList()).useComponentsV2().queue()
+            }
+        }
+    }
+}
+
+private class WatchRefreshSub : SlashCommand() {
+    init {
+        name = "refresh"
+        help = "専用チャンネルのステータスカードを削除し、チャンネル最下部へ最新状態で再配置します。"
+        options = listOf(
+            OptionData(OptionType.USER, "user", "特定の監視対象のみ再配置する場合に指定（省略時は全アクティブ対象）", false),
+        )
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val optUser = event.getOption("user")?.asUser
+        val targets = if (optUser != null) {
+            val t = watchConfigService.getTarget(guild.id, optUser.id, activeOnly = true)
+            if (t == null) {
+                replyEph(event, "対象外", "<@${optUser.id}> は現在の監視対象に登録されていません。", Color.RED)
+                return
+            }
+            listOf(t)
+        } else {
+            watchConfigService.listTargets(guild.id, activeOnly = true)
+        }
+
+        if (targets.isEmpty()) {
+            replyEph(event, "対象なし", "再配置できるアクティブな監視対象がいません。", Color.GRAY)
+            return
+        }
+
+        event.deferReply(true).queue { hook ->
+            OhagiBot.scope.launch {
+                var refreshed = 0
+                val skipped = mutableListOf<String>()
+                for (t in targets) {
+                    val ok = WatchOrchestrator.repositionTargetBoard(guild, t)
+                    if (ok) refreshed++ else skipped += "<@${t.userId}>"
+                }
+                val desc = buildString {
+                    append("**${refreshed}件** のステータスカードをチャンネル最下部へ再配置しました。")
+                    if (skipped.isNotEmpty()) {
+                        append("\n-# スキップ（BAN済み／チャンネル未設定等）: ${skipped.joinToString(", ")}")
+                    }
+                }
+                hook.editOriginalComponents(
+                    simpleTitleAndDescriptionContainer("🔄 ステータスカードを再配置しました", desc, Color(0x2E, 0xCC, 0x71))
+                ).setAllowedMentions(emptyList()).useComponentsV2().queue()
             }
         }
     }

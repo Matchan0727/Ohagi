@@ -9,6 +9,7 @@ import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
 import jp.simplespace.watch.BanTicketService
 import jp.simplespace.watch.StatusBoardService
 import jp.simplespace.watch.VoteBanService
+import jp.simplespace.watch.WatchOrchestrator
 import jp.simplespace.watch.WatchPermissions
 import jp.simplespace.watch.render.GraphRange
 import jp.simplespace.watchAiService
@@ -29,8 +30,13 @@ import net.dv8tion.jda.api.hooks.ListenerAdapter
 import net.dv8tion.jda.api.interactions.commands.Command
 import java.awt.Color
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 class WatchInteractionListener : ListenerAdapter() {
+    companion object {
+        private const val REFRESH_COOLDOWN_MILLIS = 30_000L
+        private val lastRefreshByTarget = ConcurrentHashMap<Long, Long>()
+    }
 
     override fun onCommandAutoCompleteInteraction(event: CommandAutoCompleteInteractionEvent) {
         val guild = event.guild ?: return
@@ -158,6 +164,7 @@ class WatchInteractionListener : ListenerAdapter() {
             id.startsWith("watch_graph:") -> handleGraphOpen(event, guild, id)
             id.startsWith("watch_graph_range:") -> handleGraphSwitch(event, guild, id)
             id.startsWith("watch_logs:") -> handleLogsView(event, guild, id)
+            id.startsWith("watch_refresh:") -> handleBoardRefresh(event, guild, id.substringAfter("watch_refresh:").toLongOrNull())
             id.startsWith("voteban_yes:") -> handleVoteBallot(event, guild, id.substringAfter("voteban_yes:").toLongOrNull(), VoteChoice.YES)
             id.startsWith("voteban_no:") -> handleVoteBallot(event, guild, id.substringAfter("voteban_no:").toLongOrNull(), VoteChoice.NO)
             id.startsWith("ticket_approve:") -> handleTicketApproval(event, guild, id.substringAfter("ticket_approve:").toLongOrNull(), approve = true)
@@ -170,6 +177,55 @@ class WatchInteractionListener : ListenerAdapter() {
                 event.editComponents(
                     simpleTitleAndDescriptionContainer("キャンセル", "処刑チケットの行使をキャンセルしました。", Color.GRAY)
                 ).useComponentsV2().queue()
+            }
+        }
+    }
+
+    private fun handleBoardRefresh(
+        event: ButtonInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+        targetId: Long?,
+    ) {
+        if (targetId == null) return
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "監視対象が見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        if (WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("操作できません", "監視対象者本人は自分のステータスカードを再配置できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val isAdmin = event.member != null && WatchPermissions.isGuildWatchAdmin(guild, event.member!!)
+        val now = System.currentTimeMillis()
+        if (!isAdmin) {
+            val last = lastRefreshByTarget[target.id] ?: 0L
+            if (now - last < REFRESH_COOLDOWN_MILLIS) {
+                val remain = ((REFRESH_COOLDOWN_MILLIS - (now - last)) / 1000L).coerceAtLeast(1L)
+                event.replyComponents(
+                    simpleTitleAndDescriptionContainer("⏳ クールダウン中", "再配置はあと **${remain}秒** 後に実行できます。", Color.GRAY)
+                ).useComponentsV2().setEphemeral(true).queue()
+                return
+            }
+        }
+        lastRefreshByTarget[target.id] = now
+
+        event.deferReply(true).queue { hook ->
+            OhagiBot.scope.launch {
+                val ok = WatchOrchestrator.repositionTargetBoard(guild, target)
+                hook.editOriginalComponents(
+                    simpleTitleAndDescriptionContainer(
+                        if (ok) "🔄 ステータスカードを再配置しました" else "再配置できませんでした",
+                        if (ok) "<@${target.userId}> のステータスカードを最新状態でチャンネル最下部へ再配置しました。"
+                        else "現在アクティブなサイクルではないか、専用チャンネルが未設定のため再配置できませんでした。",
+                        if (ok) Color(0x2E, 0xCC, 0x71) else Color.RED,
+                    )
+                ).setAllowedMentions(emptyList()).useComponentsV2().queue()
             }
         }
     }
