@@ -1,5 +1,6 @@
 package jp.simplespace.discord.listeners
 
+import jp.simplespace.ai.GeminiClientSettings
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.VoteChoice
@@ -74,6 +75,22 @@ class WatchInteractionListener : ListenerAdapter() {
                     null
                 }
             }.take(25)
+            event.replyChoices(choices).queue()
+            return
+        }
+
+        if (event.name == "watch" &&
+            event.subcommandGroup == "ai" &&
+            event.subcommandName == "model" &&
+            event.focusedOption.name == "model"
+        ) {
+            val typed = event.focusedOption.value.lowercase()
+            val candidates = listOf("default" to "default (application.yaml / 環境変数の既定値へ戻す)") +
+                GeminiClientSettings.RECOMMENDED_MODELS.map { it to it }
+            val choices = candidates
+                .filter { (value, label) -> typed.isBlank() || value.lowercase().contains(typed) || label.lowercase().contains(typed) }
+                .take(25)
+                .map { (value, label) -> Command.Choice(label.take(100), value) }
             event.replyChoices(choices).queue()
         }
     }

@@ -26,6 +26,16 @@ data class TargetRegistrationResult(
     val warningMessage: String? = null,
 )
 
+data class BatchViolationEntry(
+    val delta: Double,
+    val category: String?,
+    val reason: String,
+    val sourceChannelId: String?,
+    val sourceMessageId: String?,
+    val sourceMessageExcerpt: String?,
+    val aiRawJson: String?,
+)
+
 object WatchOrchestrator {
     private val locks = ConcurrentHashMap<String, Mutex>()
 
@@ -154,6 +164,71 @@ object WatchOrchestrator {
         }
 
         updatedCycle to event
+    }
+
+    /**
+     * 1バッチ内で検知された複数の違反を個別の違反ログ（watch_score_events）として順次記録し、
+     * スコアを累積加算したうえで最後に1回だけステータスボードを更新（または100%到達で遺言BAN開始）する。
+     */
+    suspend fun applyBatchViolations(
+        guild: Guild,
+        target: WatchTarget,
+        entries: List<BatchViolationEntry>,
+    ): Pair<WatchCycle, List<WatchScoreEvent>>? = withTargetLock(guild.id, target.userId) {
+        if (entries.isEmpty()) return@withTargetLock null
+        val latestTarget = watchConfigService.getTargetById(target.id) ?: return@withTargetLock null
+        if (!latestTarget.active) return@withTargetLock null
+
+        var cycle = latestTarget.currentCycleId?.let { watchCycleService.getCycleById(it) }
+            ?: watchCycleService.getLatestCycleByTarget(latestTarget.id)
+            ?: return@withTargetLock null
+
+        if (cycle.status != WatchCycleStatus.ACTIVE) {
+            return@withTargetLock null
+        }
+
+        val recordedEvents = mutableListOf<WatchScoreEvent>()
+        val baseNow = System.currentTimeMillis()
+        for ((idx, entry) in entries.withIndex()) {
+            if (entry.delta <= 0.0) continue
+            val newScore = (cycle.currentScore + entry.delta).coerceIn(0.0, 100.0)
+            val (updatedCycle, event) = watchCycleService.updateScoreAndRecordEvent(
+                cycle = cycle,
+                eventType = WatchScoreEventType.AI_VIOLATION,
+                delta = entry.delta,
+                newScore = newScore,
+                category = entry.category,
+                reason = entry.reason,
+                sourceChannelId = entry.sourceChannelId,
+                sourceMessageId = entry.sourceMessageId,
+                sourceMessageExcerpt = entry.sourceMessageExcerpt,
+                aiRawJson = entry.aiRawJson,
+                now = baseNow + idx, // 同一バッチ内イベントの時系列順序を保持
+            )
+            cycle = updatedCycle
+            recordedEvents += event
+            if (cycle.currentScore >= 100.0) {
+                break
+            }
+        }
+
+        if (recordedEvents.isEmpty()) return@withTargetLock null
+
+        if (cycle.currentScore >= 100.0) {
+            val triggerReason = recordedEvents.joinToString(" / ") { it.reason ?: "違反検知" }.take(200)
+            startBanFlowLocked(
+                guild = guild,
+                target = latestTarget,
+                cycle = cycle,
+                triggerType = BanTriggerType.SCORE_100,
+                triggerDetail = triggerReason,
+                useLastWords = true,
+            )
+        } else {
+            StatusBoardService.upsertStatusBoard(guild, latestTarget, cycle, forceNewMessage = false)
+        }
+
+        cycle to recordedEvents
     }
 
     /**

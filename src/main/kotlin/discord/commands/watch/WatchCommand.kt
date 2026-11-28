@@ -2,9 +2,11 @@ package jp.simplespace.discord.commands.watch
 
 import com.jagrosh.jdautilities.command.SlashCommand
 import com.jagrosh.jdautilities.command.SlashCommandEvent
+import jp.simplespace.ai.GeminiClientSettings
 import jp.simplespace.db.AiAutoTicketMode
 import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
+import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.WatchAiRule
 import jp.simplespace.db.WatchRoleCounter
@@ -61,6 +63,7 @@ class WatchCommand : SlashCommand() {
             WatchAiRuleEditSub(),
             WatchAiRuleRemoveSub(),
             WatchAiFeedbackSub(),
+            WatchAiModelSub(),
             // role-counter グループ
             WatchRoleCounterSetSub(),
             WatchRoleCounterListSub(),
@@ -230,7 +233,16 @@ private class WatchConfigShowSub : SlashCommand() {
             append("- 投票可決時の遺言: **${if (c.voteUseLastWords) "あり" else "即時BAN"}** / チケット行使時の遺言: **${if (c.ticketUseLastWords) "あり" else "即時BAN"}**\n\n")
             append("### AI判定\n")
             append("- 自動判定: **${if (c.aiEnabled) "ON" else "OFF"}** | 感度倍率: **${c.aiSensitivity}x** | 1回上限: **${c.aiMaxDeltaPerEval}%**\n")
-            append("- 処刑チケットAI提案モード: **`${c.aiAutoTicketMode.name}`**\n\n")
+            append("- 処刑チケットAI提案モード: **`${c.aiAutoTicketMode.name}`**\n")
+            val taskConfigs = watchAiService.listTaskConfigsByGuild(guild.id)
+            AiTaskType.entries.forEach { task ->
+                val dbCfg = taskConfigs[task]
+                val runtime = OhagiBot.aiModerationClient?.resolveTaskConfig(task, dbCfg?.modelName, dbCfg?.thinkingLevel)
+                val modelText = runtime?.model ?: (dbCfg?.modelName ?: GeminiClientSettings.DEFAULT_MODEL)
+                val thinkingText = runtime?.thinkingLevel ?: (dbCfg?.thinkingLevel ?: task.defaultThinkingLevel)
+                append("- ${task.displayName}: モデル `${modelText}` / 思考量 `${thinkingText}`\n")
+            }
+            append("\n")
             append("### 時間減衰（更生）\n")
             append("- 減衰: **${if (c.decayEnabled) "ON" else "OFF"}** | 開始猶予: **${c.decayGraceHours}時間** | 間隔: **${c.decayIntervalHours}時間**\n")
             append("- 基本減衰量: **-${c.decayAmount}%** | 落ち着きボーナス倍率: **${c.decayCalmBonusMultiplier}x**\n\n")
@@ -880,6 +892,110 @@ private class WatchAiFeedbackSub : SlashCommand() {
                 ).useComponentsV2().queue()
             }
         }
+    }
+}
+
+private class WatchAiModelSub : SlashCommand() {
+    init {
+        name = "model"
+        help = "AI機能ごと（通常監視判定／異議申し立て審査）のモデルと思考量を確認・設定します。"
+        subcommandGroup = aiGroup()
+        val taskOpt = OptionData(OptionType.STRING, "task", "設定するAI機能（省略時は現在の設定一覧を表示）", false)
+        AiTaskType.entries.forEach { taskOpt.addChoice("${it.displayName} (${it.configKey})", it.name) }
+
+        val thinkingOpt = OptionData(OptionType.STRING, "thinking", "思考量（DEFAULTで環境変数/既定値へ戻す）", false)
+            .addChoice("デフォルトに戻す (DEFAULT)", "DEFAULT")
+        GeminiClientSettings.ALLOWED_THINKING_LEVELS.forEach { level ->
+            thinkingOpt.addChoice(level, level)
+        }
+
+        options = listOf(
+            taskOpt,
+            OptionData(OptionType.STRING, "model", "モデル名（defaultでapplication.yaml/環境変数の既定値へ戻す）", false)
+                .setAutoComplete(true),
+            thinkingOpt,
+        )
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val taskStr = event.optString("task")
+        val rawModel = event.optString("model")?.trim()?.takeIf { it.isNotEmpty() }
+        val rawThinking = event.optString("thinking")?.trim()?.takeIf { it.isNotEmpty() }
+
+        if (taskStr == null || (rawModel == null && rawThinking == null)) {
+            val taskConfigs = watchAiService.listTaskConfigsByGuild(guild.id)
+            val desc = buildString {
+                AiTaskType.entries.forEach { task ->
+                    val dbCfg = taskConfigs[task]
+                    val runtime = OhagiBot.aiModerationClient?.resolveTaskConfig(task, dbCfg?.modelName, dbCfg?.thinkingLevel)
+                    val modelVal = runtime?.model ?: (dbCfg?.modelName ?: GeminiClientSettings.DEFAULT_MODEL)
+                    val thinkVal = runtime?.thinkingLevel ?: (dbCfg?.thinkingLevel ?: task.defaultThinkingLevel)
+                    val maxTok = runtime?.maxOutputTokens ?: task.defaultMaxOutputTokens
+                    val modelSrc = if (dbCfg?.modelName != null) "サーバー設定" else "デフォルト/環境変数"
+                    val thinkSrc = if (dbCfg?.thinkingLevel != null) "サーバー設定" else "デフォルト/環境変数"
+                    append("### ${task.displayName} (`${task.configKey}`)\n")
+                    append("- **モデル**: `$modelVal`（$modelSrc）\n")
+                    append("- **思考量**: `$thinkVal`（$thinkSrc） | 最大出力トークン: `$maxTok`\n\n")
+                }
+                append("-# 設定を変更するには `/watch ai model task:... model:... thinking:...` を実行してください。")
+            }.trim()
+            replyEph(event, "🤖 AI 機能別モデル・思考量設定", desc, Color(0x36, 0xB8, 0xFA))
+            return
+        }
+
+        val task = AiTaskType.fromString(taskStr)
+        if (task == null) {
+            replyEph(event, "入力エラー", "無効な機能名です。", Color.RED)
+            return
+        }
+
+        val updateModel = rawModel != null
+        val resolvedModel = when {
+            rawModel == null -> null
+            rawModel.equals("default", ignoreCase = true) || rawModel.equals("reset", ignoreCase = true) -> null
+            else -> rawModel.take(128)
+        }
+
+        val updateThinking = rawThinking != null
+        val resolvedThinking = when {
+            rawThinking == null -> null
+            rawThinking.equals("DEFAULT", ignoreCase = true) || rawThinking.equals("RESET", ignoreCase = true) -> null
+            rawThinking.uppercase() in GeminiClientSettings.ALLOWED_THINKING_LEVELS -> rawThinking.uppercase()
+            else -> {
+                replyEph(
+                    event,
+                    "入力エラー",
+                    "思考量には ${GeminiClientSettings.ALLOWED_THINKING_LEVELS.joinToString(", ")} または `DEFAULT` を指定してください。",
+                    Color.RED,
+                )
+                return
+            }
+        }
+
+        val saved = watchAiService.upsertTaskConfig(
+            guildId = guild.id,
+            taskType = task,
+            modelName = resolvedModel,
+            thinkingLevel = resolvedThinking,
+            updateModel = updateModel,
+            updateThinking = updateThinking,
+        )
+        val runtime = OhagiBot.aiModerationClient?.resolveTaskConfig(task, saved.modelName, saved.thinkingLevel)
+        val effModel = runtime?.model ?: (saved.modelName ?: GeminiClientSettings.DEFAULT_MODEL)
+        val effThink = runtime?.thinkingLevel ?: (saved.thinkingLevel ?: task.defaultThinkingLevel)
+
+        replyEph(
+            event,
+            "🤖 ${task.displayName} の AI 設定を更新しました",
+            "- **実効モデル**: `$effModel`" + (if (saved.modelName == null) "（デフォルト参照）" else "") + "\n" +
+                "- **実効思考量**: `$effThink`" + (if (saved.thinkingLevel == null) "（デフォルト参照）" else ""),
+            Color(0x2E, 0xCC, 0x71),
+        )
     }
 }
 

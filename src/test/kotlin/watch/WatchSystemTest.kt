@@ -5,12 +5,14 @@ import jp.simplespace.ai.AppealReviewResult
 import jp.simplespace.ai.ContextMessage
 import jp.simplespace.ai.GeminiClientSettings
 import jp.simplespace.ai.GeminiModerationClient
+import jp.simplespace.ai.GeminiTaskOverrideSettings
 import jp.simplespace.ai.ModerationAttachment
 import jp.simplespace.ai.ModerationEvaluationRequest
 import jp.simplespace.ai.ModerationEvaluationResult
 import jp.simplespace.ai.ModerationPromptBuilder
 import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
+import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.AppealDecision
 import jp.simplespace.db.TicketIssueSource
@@ -395,7 +397,7 @@ class WatchSystemTest {
         assertEquals("MEDIUM", appealCfg.thinkingConfig().get().thinkingLevel().get().toString())
 
         val sysPrompt = ModerationPromptBuilder.buildSystemInstruction()
-        assertTrue(sysPrompt.contains("空文字"))
+        assertTrue(sysPrompt.contains("空配列"))
         assertTrue(sysPrompt.contains("30文字以内"))
     }
 
@@ -505,5 +507,80 @@ class WatchSystemTest {
 
         // 数値が無いロール名は null
         assertEquals(null, WatchRoleCounter.inferFromRoleName("一般メンバー"))
+    }
+
+    @Test
+    fun testMultiViolationResponseParsingAndScoring() {
+        val client = GeminiModerationClient(GeminiClientSettings(provider = "gemini_api", googleApiKey = null))
+        val parsed = client.parseResponseJson(
+            """
+            {
+              "violations": [
+                {
+                  "message_indices": [1, 2],
+                  "base_delta": 10.0,
+                  "severity": "MEDIUM",
+                  "category": "INSULT",
+                  "reason_ja": "特定メンバーへの暴言"
+                },
+                {
+                  "message_indices": [4],
+                  "base_delta": 6.0,
+                  "severity": "LOW",
+                  "category": "SPAM",
+                  "reason_ja": "無意味な連投スパム"
+                }
+              ],
+              "victim_user_id": null,
+              "suggest_ban_ticket": false,
+              "ticket_reason_ja": null
+            }
+            """.trimIndent()
+        )
+        val violations = parsed.resolvedViolations()
+        assertEquals(2, violations.size)
+        assertEquals(listOf(1, 2), violations[0].messageIndices)
+        assertEquals(listOf(4), violations[1].messageIndices)
+        assertEquals(16.0, parsed.computeFinalDelta(sensitivity = 1.0, maxDeltaPerEval = 25.0))
+        // 1件あたりの上限はそれぞれ個別に適用される（10*2=20, 6*2=12 -> 合計32）
+        assertEquals(32.0, parsed.computeFinalDelta(sensitivity = 2.0, maxDeltaPerEval = 25.0))
+
+        // 違反0件の空配列
+        val clean = client.parseResponseJson("""{"violations":[],"suggest_ban_ticket":false}""")
+        assertTrue(clean.resolvedViolations().isEmpty())
+        assertEquals(0.0, clean.computeFinalDelta(1.0, 25.0))
+    }
+
+    @Test
+    fun testPerFeatureModelAndThinkingConfigResolution() {
+        val settings = GeminiClientSettings(
+            provider = "gemini_api",
+            model = "gemini-4-hydrogen", // application.yaml 既定値
+            taskOverrides = mapOf(
+                AiTaskType.MODERATION to GeminiTaskOverrideSettings(
+                    model = "gemini-3.5-flash-lite",
+                    thinkingLevel = "MINIMAL",
+                ),
+                // APPEAL は未指定なのでデフォルトモデル + タスク既定思考量(MEDIUM)にフォールバック
+            ),
+        )
+        val client = GeminiModerationClient(settings)
+
+        val modRuntime = client.resolveTaskConfig(AiTaskType.MODERATION)
+        assertEquals("gemini-3.5-flash-lite", modRuntime.model)
+        assertEquals("MINIMAL", modRuntime.thinkingLevel)
+
+        val appealRuntime = client.resolveTaskConfig(AiTaskType.APPEAL)
+        assertEquals("gemini-4-hydrogen", appealRuntime.model)
+        assertEquals("MEDIUM", appealRuntime.thinkingLevel)
+
+        // サーバーDBオーバーライドが最優先されること
+        val dbOverridden = client.resolveTaskConfig(
+            task = AiTaskType.APPEAL,
+            overrideModel = "gemini-4-argon",
+            overrideThinkingLevel = "HIGH",
+        )
+        assertEquals("gemini-4-argon", dbOverridden.model)
+        assertEquals("HIGH", dbOverridden.thinkingLevel)
     }
 }

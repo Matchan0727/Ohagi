@@ -2,6 +2,7 @@ package jp.simplespace.watch
 
 import jp.simplespace.ai.AppealReviewRequest
 import jp.simplespace.ai.ContextMessage
+import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.AppealDecision
 import jp.simplespace.db.WatchCycleStatus
 import jp.simplespace.db.WatchScoreEvent
@@ -115,6 +116,7 @@ object WatchAppealService {
         val targetDisplayName = message.member?.effectiveName ?: message.author.effectiveName
         val rules = watchAiService.listRulesForEvaluation(guild.id, target.id)
         val feedbacks = watchAiService.getFewShotFeedbacks(guild.id, target.id, limit = 8)
+        val appealTaskCfg = watchAiService.getTaskConfig(guild.id, AiTaskType.APPEAL)
 
         val request = AppealReviewRequest(
             guildName = guild.name,
@@ -129,6 +131,8 @@ object WatchAppealService {
             alreadyReviewedEventIds = alreadyReviewedIds,
             contextMessages = contextMessages,
             appealMessage = cleanedText,
+            overrideModel = appealTaskCfg?.modelName,
+            overrideThinkingLevel = appealTaskCfg?.thinkingLevel,
         )
 
         val (result, rawJson) = aiClient.reviewAppeal(request) ?: return false

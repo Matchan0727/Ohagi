@@ -1,11 +1,18 @@
 package jp.simplespace.ai
 
+import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.AppealDecision
 import jp.simplespace.db.WatchAiFeedback
 import jp.simplespace.db.WatchAiRule
 import jp.simplespace.db.WatchScoreEvent
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+
+data class AiTaskRuntimeConfig(
+    val model: String,
+    val thinkingLevel: String,
+    val maxOutputTokens: Int,
+)
 
 @Serializable
 data class ContextMessage(
@@ -47,10 +54,31 @@ data class ModerationEvaluationRequest(
     val targetMessages: List<String>,
     val attachments: List<ModerationAttachment> = emptyList(),
     val spamMetricsSummary: String? = null,
+    val overrideModel: String? = null,
+    val overrideThinkingLevel: String? = null,
 )
 
 @Serializable
+data class DetectedViolation(
+    @SerialName("message_indices")
+    val messageIndices: List<Int> = emptyList(),
+    @SerialName("base_delta")
+    val baseDelta: Double = 0.0,
+    val severity: String = "LOW",
+    val category: String = "TOXIC",
+    @SerialName("reason_ja")
+    val reasonJa: String = "",
+) {
+    fun computeFinalDelta(sensitivity: Double, maxDeltaPerEval: Double): Double {
+        if (baseDelta <= 0.0) return 0.0
+        val scaled = baseDelta * sensitivity.coerceIn(0.1, 5.0)
+        return scaled.coerceIn(0.0, maxDeltaPerEval.coerceAtLeast(0.0))
+    }
+}
+
+@Serializable
 data class ModerationEvaluationResult(
+    val violations: List<DetectedViolation> = emptyList(),
     @SerialName("is_violation")
     val isViolation: Boolean = false,
     @SerialName("base_delta")
@@ -67,12 +95,30 @@ data class ModerationEvaluationResult(
     val ticketReasonJa: String? = null,
 ) {
     /**
-     * サーバー設定の感度倍率・最大加算キャップを適用した最終スコア増分を計算する。
+     * 複数違反配列を優先して返し、旧形式（単一フィールドのみ）のレスポンスにも後方互換対応する。
+     */
+    fun resolvedViolations(): List<DetectedViolation> {
+        val validList = violations.filter { it.baseDelta > 0.0 }
+        if (validList.isNotEmpty()) return validList
+        if (isViolation && baseDelta > 0.0) {
+            return listOf(
+                DetectedViolation(
+                    messageIndices = emptyList(),
+                    baseDelta = baseDelta,
+                    severity = severity,
+                    category = category,
+                    reasonJa = reasonJa,
+                )
+            )
+        }
+        return emptyList()
+    }
+
+    /**
+     * サーバー設定の感度倍率・最大加算キャップを適用した合計スコア増分を計算する（単体/互換用）。
      */
     fun computeFinalDelta(sensitivity: Double, maxDeltaPerEval: Double): Double {
-        if (!isViolation || baseDelta <= 0.0) return 0.0
-        val scaled = baseDelta * sensitivity.coerceIn(0.1, 5.0)
-        return scaled.coerceIn(0.0, maxDeltaPerEval.coerceAtLeast(0.0))
+        return resolvedViolations().sumOf { it.computeFinalDelta(sensitivity, maxDeltaPerEval) }
     }
 }
 
@@ -89,6 +135,8 @@ data class AppealReviewRequest(
     val alreadyReviewedEventIds: Set<Long>,
     val contextMessages: List<ContextMessage>,
     val appealMessage: String,
+    val overrideModel: String? = null,
+    val overrideThinkingLevel: String? = null,
 )
 
 @Serializable
@@ -153,6 +201,11 @@ data class AppealReviewResult(
 
 interface AiModerationClient {
     val isConfigured: Boolean
+    fun resolveTaskConfig(
+        task: AiTaskType,
+        overrideModel: String? = null,
+        overrideThinkingLevel: String? = null,
+    ): AiTaskRuntimeConfig
     suspend fun evaluate(request: ModerationEvaluationRequest): Pair<ModerationEvaluationResult, String>?
     suspend fun reviewAppeal(request: AppealReviewRequest): Pair<AppealReviewResult, String>?
 }

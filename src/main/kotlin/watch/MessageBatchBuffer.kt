@@ -4,6 +4,7 @@ import jp.simplespace.ai.AiModerationClient
 import jp.simplespace.ai.ContextMessage
 import jp.simplespace.ai.ModerationAttachment
 import jp.simplespace.ai.ModerationEvaluationRequest
+import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.WatchCycleStatus
 import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.discord.OhagiBot
@@ -506,6 +507,7 @@ class MessageBatchBuffer(
         }
 
         val spamSummary = batch.spamReasons.takeIf { it.isNotEmpty() }?.joinToString(" / ")
+        val taskCfg = watchAiService.getTaskConfig(guild.id, AiTaskType.MODERATION)
 
         val evalReq = ModerationEvaluationRequest(
             guildName = guild.name,
@@ -519,29 +521,45 @@ class MessageBatchBuffer(
             targetMessages = formattedTargetMessages,
             attachments = moderationAttachments,
             spamMetricsSummary = spamSummary,
+            overrideModel = taskCfg?.modelName,
+            overrideThinkingLevel = taskCfg?.thinkingLevel,
         )
 
         val (result, rawJson) = aiClient.evaluate(evalReq) ?: return
-        val finalDelta = result.computeFinalDelta(config.aiSensitivity, config.aiMaxDeltaPerEval)
-        if (finalDelta <= 0.0) return
+        val detectedViolations = result.resolvedViolations()
+        if (detectedViolations.isEmpty()) return
 
-        val combinedExcerpt = batch.messages.joinToString("\n") { it.content }.take(500)
-        val lastMessageId = batch.messages.last().messageId
+        val entries = detectedViolations.mapNotNull { v ->
+            val delta = v.computeFinalDelta(config.aiSensitivity, config.aiMaxDeltaPerEval)
+            if (delta <= 0.0) return@mapNotNull null
 
-        val applied = WatchOrchestrator.applyScoreChange(
+            val matchedMsgs = v.messageIndices
+                .mapNotNull { idx -> batch.messages.getOrNull(idx - 1) }
+                .ifEmpty { batch.messages }
+
+            val excerpt = matchedMsgs.joinToString("\n") { it.content }.take(500)
+            val sourceMsgId = matchedMsgs.last().messageId
+            BatchViolationEntry(
+                delta = delta,
+                category = v.category.take(32),
+                reason = v.reasonJa.ifBlank { "不適切な発言・添付を検知" },
+                sourceChannelId = batch.channelId,
+                sourceMessageId = sourceMsgId,
+                sourceMessageExcerpt = excerpt,
+                aiRawJson = rawJson,
+            )
+        }
+        if (entries.isEmpty()) return
+
+        val applied = WatchOrchestrator.applyBatchViolations(
             guild = guild,
             target = target,
-            eventType = WatchScoreEventType.AI_VIOLATION,
-            delta = finalDelta,
-            category = result.category.take(32),
-            reason = result.reasonJa.ifBlank { "不適切な発言・添付を検知" },
-            sourceChannelId = batch.channelId,
-            sourceMessageId = lastMessageId,
-            sourceMessageExcerpt = combinedExcerpt,
-            aiRawJson = rawJson,
+            entries = entries,
         ) ?: return
 
-        val (_, scoreEvent) = applied
+        val (_, recordedEvents) = applied
+        val representativeEvent = recordedEvents.maxByOrNull { it.delta } ?: recordedEvents.last()
+        val combinedExcerpt = batch.messages.joinToString("\n") { it.content }.take(500)
 
         // 処刑チケット提案の検証と連携
         val victimId = result.victimUserId?.trim()?.takeIf { it.isNotEmpty() && it != target.userId }
@@ -550,8 +568,9 @@ class MessageBatchBuffer(
                 guild.getMemberById(victimId) != null
             if (victimExistsInContext) {
                 val ticketReason = result.ticketReasonJa?.takeIf { it.isNotBlank() }
-                    ?: result.reasonJa.ifBlank { "特定メンバーへの重大な問題発言" }
-                onTicketSuggested(guild, target, victimId, ticketReason, scoreEvent.id, combinedExcerpt)
+                    ?: representativeEvent.reason?.takeIf { it.isNotBlank() }
+                    ?: "特定メンバーへの重大な問題発言"
+                onTicketSuggested(guild, target, victimId, ticketReason, representativeEvent.id, combinedExcerpt)
             }
         }
     }

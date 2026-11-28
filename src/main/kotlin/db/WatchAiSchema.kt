@@ -16,6 +16,32 @@ import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.jetbrains.exposed.v1.jdbc.update
 
+enum class AiTaskType(
+    val configKey: String,
+    val displayName: String,
+    val defaultThinkingLevel: String,
+    val defaultMaxOutputTokens: Int,
+) {
+    MODERATION("moderation", "通常監視判定", "LOW", 1024),
+    APPEAL("appeal", "異議申し立て審査", "MEDIUM", 1536);
+
+    companion object {
+        fun fromString(v: String?): AiTaskType? =
+            entries.firstOrNull {
+                it.name.equals(v, ignoreCase = true) || it.configKey.equals(v, ignoreCase = true)
+            }
+    }
+}
+
+@Serializable
+data class WatchAiTaskConfig(
+    val guildId: String,
+    val taskType: AiTaskType,
+    val modelName: String?,
+    val thinkingLevel: String?,
+    val updatedAt: Long,
+)
+
 enum class AiRuleType(val displayName: String) {
     VIOLATION("違反ルール (NG傾向)"),
     ALLOW("許容ルール (身内ネタ等)");
@@ -157,9 +183,19 @@ class WatchAiService(private val database: Database) {
         override val primaryKey = PrimaryKey(id)
     }
 
+    object WatchAiTaskConfigs : Table("watch_ai_task_configs") {
+        val guildId = varchar("guild_id", 64)
+        val taskType = varchar("task_type", 24)
+        val modelName = varchar("model_name", 128).nullable()
+        val thinkingLevel = varchar("thinking_level", 16).nullable()
+        val updatedAt = long("updated_at")
+
+        override val primaryKey = PrimaryKey(guildId, taskType)
+    }
+
     init {
         transaction(database) {
-            SchemaUtils.create(WatchAiRules, WatchAiFeedbacks, WatchAppeals)
+            SchemaUtils.create(WatchAiRules, WatchAiFeedbacks, WatchAppeals, WatchAiTaskConfigs)
         }
     }
 
@@ -364,6 +400,70 @@ class WatchAiService(private val database: Database) {
             botReply = botReply.take(2000),
             createdAt = now,
         )
+    }
+
+    fun getTaskConfig(guildId: String, taskType: AiTaskType): WatchAiTaskConfig? = transaction(database) {
+        WatchAiTaskConfigs.selectAll()
+            .where { (WatchAiTaskConfigs.guildId eq guildId) and (WatchAiTaskConfigs.taskType eq taskType.name) }
+            .singleOrNull()
+            ?.let {
+                WatchAiTaskConfig(
+                    guildId = it[WatchAiTaskConfigs.guildId],
+                    taskType = AiTaskType.fromString(it[WatchAiTaskConfigs.taskType]) ?: taskType,
+                    modelName = it[WatchAiTaskConfigs.modelName],
+                    thinkingLevel = it[WatchAiTaskConfigs.thinkingLevel],
+                    updatedAt = it[WatchAiTaskConfigs.updatedAt],
+                )
+            }
+    }
+
+    fun listTaskConfigsByGuild(guildId: String): Map<AiTaskType, WatchAiTaskConfig> = transaction(database) {
+        WatchAiTaskConfigs.selectAll()
+            .where { WatchAiTaskConfigs.guildId eq guildId }
+            .mapNotNull { row ->
+                val task = AiTaskType.fromString(row[WatchAiTaskConfigs.taskType]) ?: return@mapNotNull null
+                task to WatchAiTaskConfig(
+                    guildId = row[WatchAiTaskConfigs.guildId],
+                    taskType = task,
+                    modelName = row[WatchAiTaskConfigs.modelName],
+                    thinkingLevel = row[WatchAiTaskConfigs.thinkingLevel],
+                    updatedAt = row[WatchAiTaskConfigs.updatedAt],
+                )
+            }
+            .toMap()
+    }
+
+    fun upsertTaskConfig(
+        guildId: String,
+        taskType: AiTaskType,
+        modelName: String?,
+        thinkingLevel: String?,
+        updateModel: Boolean,
+        updateThinking: Boolean,
+    ): WatchAiTaskConfig = transaction(database) {
+        val now = System.currentTimeMillis()
+        val existing = getTaskConfig(guildId, taskType)
+        val newModel = if (updateModel) modelName else existing?.modelName
+        val newThinking = if (updateThinking) thinkingLevel else existing?.thinkingLevel
+
+        if (existing != null) {
+            WatchAiTaskConfigs.update({
+                (WatchAiTaskConfigs.guildId eq guildId) and (WatchAiTaskConfigs.taskType eq taskType.name)
+            }) {
+                it[WatchAiTaskConfigs.modelName] = newModel
+                it[WatchAiTaskConfigs.thinkingLevel] = newThinking
+                it[WatchAiTaskConfigs.updatedAt] = now
+            }
+        } else {
+            WatchAiTaskConfigs.insert {
+                it[WatchAiTaskConfigs.guildId] = guildId
+                it[WatchAiTaskConfigs.taskType] = taskType.name
+                it[WatchAiTaskConfigs.modelName] = newModel
+                it[WatchAiTaskConfigs.thinkingLevel] = newThinking
+                it[WatchAiTaskConfigs.updatedAt] = now
+            }
+        }
+        WatchAiTaskConfig(guildId, taskType, newModel, newThinking, now)
     }
 
     private fun ResultRow.toRule(): WatchAiRule = WatchAiRule(

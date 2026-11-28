@@ -120,8 +120,13 @@ GOOGLE_APPLICATION_CREDENTIALS=/usr/app/gcp-sa.json
 | `gemini-4-hydrogen`（デフォルト） | 高速かつ文脈・ニュアンス理解のバランスが優秀 | 通常運用（身内ノリと本気の暴言の判別に強い） |
 | `gemini-3.5-flash-lite` | 超高速・最低コスト | 発言量が非常に多いサーバーでクレジット消費を抑えたい場合 |
 
-> **出力トークン最適化（デフォルト有効）**:
-> 通常監視判定は `thinkingLevel=LOW`・`maxOutputTokens=768`（違反なし時は理由を空文字で出力）、異議申し立て審査のみ `thinkingLevel=MEDIUM`・`maxOutputTokens=1536` で動作します。必要に応じて環境変数 `AI_THINKING_LEVEL` / `AI_APPEAL_THINKING_LEVEL` / `AI_MAX_OUTPUT_TOKENS` / `AI_APPEAL_MAX_OUTPUT_TOKENS` で上書きできます。
+> **機能別のモデル・思考量設定（優先順位）**:
+> `application.yaml` の `ai.model`（または `AI_MODEL`）は全体デフォルト値として扱われ、機能ごと（通常監視判定 `moderation` / 異議申し立て審査 `appeal`）に以下の優先順位で上書きできます：
+> 1. **Discord コマンド（サーバー単位）**: `/watch ai model task:... model:... thinking:...`（`default` 指定で既定値へ戻せます）
+> 2. **機能別の環境変数 / `application.yaml` (`ai.tasks.<task>.*`)**:
+>    - 通常監視判定: `AI_MODERATION_MODEL` / `AI_MODERATION_THINKING_LEVEL`（既定 `LOW`） / `AI_MODERATION_MAX_OUTPUT_TOKENS`（既定 `1024`）
+>    - 異議申し立て: `AI_APPEAL_MODEL` / `AI_APPEAL_THINKING_LEVEL`（既定 `MEDIUM`） / `AI_APPEAL_MAX_OUTPUT_TOKENS`（既定 `1536`）
+> 3. **全体デフォルト**: `application.yaml` の `ai.model`（`AI_MODEL`、未設定時は `gemini-4-hydrogen`）および `AI_THINKING_LEVEL`
 
 ### 3.3 デプロイ前のチェック項目（日本語フォント・ビルドメモリ）
 1. **日本語フォント（文字化け対策）**
