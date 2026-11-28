@@ -600,13 +600,53 @@ class WatchSystemTest {
         assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("それはさすがに言い過ぎだろ"))
         assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("マジで不快だからやめて"))
 
-        // 報告モーダルと処罰種別
+        // 報告モーダルと処罰種別（プリセット + 自由入力）
         assertEquals(30.0, ReportPunishmentType.SCORE_30.scoreDelta)
         assertFalse(ReportPunishmentType.SCORE_30.isBan)
         assertTrue(ReportPunishmentType.BAN.isBan)
 
+        val custom22 = jp.simplespace.db.ReportPunishment.fromStorageValue(
+            jp.simplespace.db.ReportPunishment.score(22.5).toStorageValue()
+        )
+        assertFalse(custom22.isBan)
+        assertEquals(22.5, custom22.scoreDelta)
+        assertEquals("違反度 +22.5% 加算", custom22.displayName)
+
+        // 全角・%付き入力のパース
+        val (resolvedCustom, errCustom) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
+            ReportPunishmentType.CUSTOM.name,
+            "＋２５％",
+        )
+        assertEquals(null, errCustom)
+        assertNotNull(resolvedCustom)
+        assertEquals(25.0, resolvedCustom.scoreDelta)
+        assertEquals("違反度 +25% 加算", resolvedCustom.displayName)
+
+        // プリセットのまま自由入力欄に数値を入れた場合は自由入力を優先
+        val (resolvedOverride, errOverride) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
+            ReportPunishmentType.SCORE_30.name,
+            "12.5",
+        )
+        assertEquals(null, errOverride)
+        assertEquals(12.5, resolvedOverride?.scoreDelta)
+
+        // BAN と自由入力の同時指定や範囲外はエラー
+        val (banConflict, errBan) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
+            ReportPunishmentType.BAN.name,
+            "20",
+        )
+        assertEquals(null, banConflict)
+        assertNotNull(errBan)
+
+        val (missingCustom, errMissing) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
+            ReportPunishmentType.CUSTOM.name,
+            "",
+        )
+        assertEquals(null, missingCustom)
+        assertNotNull(errMissing)
+
         val modal = jp.simplespace.discord.listeners.WatchInteractionListener.buildIncidentReportModal(9L, "T氏")
         assertEquals("watch_report_modal:9", modal.id)
-        assertEquals(3, modal.components.size)
+        assertEquals(4, modal.components.size)
     }
 }

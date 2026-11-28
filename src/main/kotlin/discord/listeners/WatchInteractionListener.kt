@@ -3,6 +3,7 @@ package jp.simplespace.discord.listeners
 import jp.simplespace.ai.GeminiClientSettings
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
+import jp.simplespace.db.ReportPunishment
 import jp.simplespace.db.ReportPunishmentType
 import jp.simplespace.db.VoteChoice
 import jp.simplespace.discord.OhagiBot
@@ -58,8 +59,15 @@ class WatchInteractionListener : ListenerAdapter() {
                 .addOption(ReportPunishmentType.SCORE_15.displayName, ReportPunishmentType.SCORE_15.name)
                 .addOption(ReportPunishmentType.SCORE_30.displayName, ReportPunishmentType.SCORE_30.name)
                 .addOption(ReportPunishmentType.SCORE_50.displayName, ReportPunishmentType.SCORE_50.name)
+                .addOption(ReportPunishmentType.CUSTOM.displayName, ReportPunishmentType.CUSTOM.name)
                 .addOption(ReportPunishmentType.BAN.displayName, ReportPunishmentType.BAN.name)
                 .setDefaultValues(ReportPunishmentType.SCORE_30.name)
+                .build()
+
+            val customScoreInput = TextInput.create("custom_score_delta", TextInputStyle.SHORT)
+                .setPlaceholder("例: 20 や 12.5（0.1〜100。空欄なら上のプリセットを使用）")
+                .setMaxLength(10)
+                .setRequired(false)
                 .build()
 
             val detailInput = TextInput.create("report_detail", TextInputStyle.PARAGRAPH)
@@ -74,9 +82,30 @@ class WatchInteractionListener : ListenerAdapter() {
                 .addComponents(
                     Label.of("発生場所・状況", placeMenu),
                     Label.of("提案する処罰内容", punishmentMenu),
+                    Label.of("違反度の自由加算数（任意）", "数値を入力するとその加算数が適用されます（0.1〜100）", customScoreInput),
                     Label.of("報告内容", "Botが監視できない場所での問題行動を具体的に記入してください", detailInput),
                 )
                 .build()
+        }
+
+        fun resolveReportPunishment(
+            selectedPresetRaw: String?,
+            customDeltaRaw: String?,
+        ): Pair<ReportPunishment?, String?> {
+            val preset = ReportPunishmentType.fromString(selectedPresetRaw)
+            val customTrimmed = customDeltaRaw?.trim().orEmpty()
+            if (customTrimmed.isNotEmpty()) {
+                if (preset == ReportPunishmentType.BAN) {
+                    return null to "「BAN 処刑」と自由指定の違反度加算数は同時に指定できません。数値加算にする場合はプリセットを「自由入力の違反度を加算」にしてください。"
+                }
+                val parsed = ReportPunishment.parseCustomDeltaInput(customTrimmed)
+                    ?: return null to "違反度加算数は `0.1` 〜 `100` の数値で入力してください（例: `20`、`12.5`）。"
+                return ReportPunishment.score(parsed) to null
+            }
+            if (preset == ReportPunishmentType.CUSTOM) {
+                return null to "「自由入力の違反度を加算」を選んだ場合は、違反度の自由加算数（`0.1` 〜 `100`）を入力してください。"
+            }
+            return ReportPunishment.fromPreset(preset) to null
         }
     }
 
@@ -289,9 +318,16 @@ class WatchInteractionListener : ListenerAdapter() {
         }
 
         val place = event.getValue("incident_place")?.asStringList?.firstOrNull() ?: "VC（ボイスチャット）"
-        val punishment = ReportPunishmentType.fromString(
-            event.getValue("punishment_type")?.asStringList?.firstOrNull()
+        val (punishment, punishmentError) = resolveReportPunishment(
+            selectedPresetRaw = event.getValue("punishment_type")?.asStringList?.firstOrNull(),
+            customDeltaRaw = event.getValue("custom_score_delta")?.asString,
         )
+        if (punishment == null) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("入力エラー", punishmentError ?: "処罰内容の指定が不正です。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
         val detail = event.getValue("report_detail")?.asString?.trim()?.takeIf { it.isNotEmpty() }
         if (detail == null) {
             event.replyComponents(simpleTitleAndDescriptionContainer("入力エラー", "報告内容を入力してください。", Color.RED))
@@ -305,7 +341,7 @@ class WatchInteractionListener : ListenerAdapter() {
             target = target,
             reporterUserId = event.user.id,
             incidentPlace = place,
-            punishmentType = punishment,
+            punishment = punishment,
             detail = detail,
         )
         event.replyComponents(

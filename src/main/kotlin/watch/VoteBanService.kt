@@ -1,7 +1,7 @@
 package jp.simplespace.watch
 
 import jp.simplespace.db.BanTriggerType
-import jp.simplespace.db.ReportPunishmentType
+import jp.simplespace.db.ReportPunishment
 import jp.simplespace.db.VoteChoice
 import jp.simplespace.db.WatchCycleStatus
 import jp.simplespace.db.WatchIncidentReport
@@ -122,7 +122,7 @@ object VoteBanService {
         target: WatchTarget,
         reporterUserId: String,
         incidentPlace: String,
-        punishmentType: ReportPunishmentType,
+        punishment: ReportPunishment,
         detail: String,
     ): StartVoteResult {
         val config = watchConfigService.getOrCreateConfig(guild.id)
@@ -171,7 +171,7 @@ object VoteBanService {
             targetId = target.id,
             reporterUserId = reporterUserId,
             incidentPlace = incidentPlace,
-            punishmentType = punishmentType,
+            punishment = punishment,
             detail = detail,
         )
 
@@ -195,7 +195,7 @@ object VoteBanService {
 
         return StartVoteResult(
             success = true,
-            message = "<#${postChannel.id}> に違反報告と処罰投票（ID: `#${vote.id}` / 提案: **${punishmentType.displayName}**）を開始しました。",
+            message = "<#${postChannel.id}> に違反報告と処罰投票（ID: `#${vote.id}` / 提案: **${punishment.displayName}**）を開始しました。",
             vote = savedVote,
         )
     }
@@ -217,11 +217,16 @@ object VoteBanService {
             return false to "監視対象者本人はこの投票に参加できません。"
         }
 
+        val report = watchVoteTicketService.getIncidentReportByVoteId(voteId)
         val tally = watchVoteTicketService.castBallot(voteId, voterUserId, choice)
         val config = watchConfigService.getOrCreateConfig(guild.id)
-        updateVoteMessage(guild, vote, target, tally, config.voteMinYesVotes, config.votePassRatio)
+        updateVoteMessage(guild, vote, target, tally, config.voteMinYesVotes, config.votePassRatio, report)
 
-        val choiceLabel = if (choice == VoteChoice.YES) "👍 賛成 (BAN)" else "👎 反対"
+        val choiceLabel = if (choice == VoteChoice.YES) {
+            if (report != null) "👍 賛成 (${report.punishment.displayName})" else "👍 賛成 (BAN)"
+        } else {
+            "👎 反対"
+        }
         return true to "**$choiceLabel** に投票しました（現在: 賛成 ${tally.yesCount}票 / 反対 ${tally.noCount}票）。"
     }
 
@@ -279,13 +284,13 @@ object VoteBanService {
         updateVoteMessage(guild, closed, target, tally, config.voteMinYesVotes, config.votePassRatio, report)
 
         if (passed) {
-            if (report != null && !report.punishmentType.isBan) {
+            if (report != null && !report.punishment.isBan) {
                 val detail = "報告投票#${voteId}可決（賛成${tally.yesCount}/反対${tally.noCount}）[${report.incidentPlace}]: ${report.detail.take(120)}"
                 WatchOrchestrator.applyScoreChange(
                     guild = guild,
                     target = target,
                     eventType = WatchScoreEventType.VOTE_BAN,
-                    delta = report.punishmentType.scoreDelta,
+                    delta = report.punishment.scoreDelta,
                     category = "REPORT_VOTE",
                     reason = detail,
                     sourceChannelId = vote.channelId,
@@ -359,7 +364,7 @@ object VoteBanService {
             append("- **${if (isReportVote) "報告者" else "発議者"}**: <@${vote.initiatorUserId}>\n")
             if (report != null) {
                 append("- **発生場所**: ${report.incidentPlace}\n")
-                append("- **提案処罰**: **${report.punishmentType.displayName}**\n")
+                append("- **提案処罰**: **${report.punishment.displayName}**\n")
                 append("- **報告内容**: ${report.detail}\n")
             } else {
                 append("- **理由**: ${vote.reason}\n")
@@ -373,7 +378,7 @@ object VoteBanService {
             }
         }
 
-        val yesLabel = if (report != null) "👍 賛成 (${report.punishmentType.displayName}) [${tally.yesCount}]" else "👍 賛成 (BAN) [${tally.yesCount}]"
+        val yesLabel = if (report != null) "👍 賛成 (${report.punishment.displayName}) [${tally.yesCount}]" else "👍 賛成 (BAN) [${tally.yesCount}]"
         val yesBtn = Button.danger("voteban_yes:${vote.id}", yesLabel.take(80))
             .withDisabled(vote.status != WatchVoteStatus.OPEN)
         val noBtn = Button.secondary("voteban_no:${vote.id}", "👎 反対 [${tally.noCount}]")

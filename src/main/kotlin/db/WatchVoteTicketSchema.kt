@@ -43,11 +43,90 @@ enum class ReportPunishmentType(
     SCORE_15("違反度 +15% 加算", 15.0, false),
     SCORE_30("違反度 +30% 加算", 30.0, false),
     SCORE_50("違反度 +50% 加算", 50.0, false),
+    CUSTOM("自由入力の違反度を加算（下の欄で指定）", 0.0, false),
     BAN("BAN 処刑", 0.0, true);
 
     companion object {
         fun fromString(v: String?): ReportPunishmentType =
             entries.firstOrNull { it.name.equals(v, ignoreCase = true) } ?: SCORE_30
+    }
+}
+
+@Serializable
+data class ReportPunishment(
+    val isBan: Boolean,
+    val scoreDelta: Double,
+) {
+    val displayName: String
+        get() = if (isBan) {
+            "BAN 処刑"
+        } else {
+            val formatted = formatDelta(scoreDelta)
+            "違反度 +${formatted}% 加算"
+        }
+
+    fun toStorageValue(): String = if (isBan) {
+        ReportPunishmentType.BAN.name
+    } else {
+        when (scoreDelta) {
+            15.0 -> ReportPunishmentType.SCORE_15.name
+            30.0 -> ReportPunishmentType.SCORE_30.name
+            50.0 -> ReportPunishmentType.SCORE_50.name
+            else -> "SCORE:${formatDelta(scoreDelta)}"
+        }
+    }
+
+    companion object {
+        const val MIN_CUSTOM_SCORE_DELTA = 0.1
+        const val MAX_CUSTOM_SCORE_DELTA = 100.0
+
+        fun ban(): ReportPunishment = ReportPunishment(isBan = true, scoreDelta = 0.0)
+
+        fun score(delta: Double): ReportPunishment {
+            val rounded = kotlin.math.round(delta.coerceIn(MIN_CUSTOM_SCORE_DELTA, MAX_CUSTOM_SCORE_DELTA) * 10.0) / 10.0
+            return ReportPunishment(isBan = false, scoreDelta = rounded)
+        }
+
+        fun fromPreset(type: ReportPunishmentType): ReportPunishment =
+            if (type.isBan) ban() else score(if (type.scoreDelta > 0.0) type.scoreDelta else 30.0)
+
+        fun parseCustomDeltaInput(raw: String?): Double? {
+            if (raw.isNullOrBlank()) return null
+            val normalized = buildString {
+                for (ch in raw.trim()) {
+                    when (ch) {
+                        in '０'..'９' -> append(('0'.code + (ch.code - '０'.code)).toChar())
+                        '．' -> append('.')
+                        '＋' -> append('+')
+                        '％' -> append('%')
+                        ' ', '　' -> Unit
+                        else -> append(ch)
+                    }
+                }
+            }.removePrefix("+").removeSuffix("%")
+            val parsed = normalized.toDoubleOrNull() ?: return null
+            if (!parsed.isFinite() || parsed < MIN_CUSTOM_SCORE_DELTA || parsed > MAX_CUSTOM_SCORE_DELTA) return null
+            return kotlin.math.round(parsed * 10.0) / 10.0
+        }
+
+        fun fromStorageValue(raw: String?): ReportPunishment {
+            val v = raw?.trim().orEmpty()
+            if (v.equals(ReportPunishmentType.BAN.name, ignoreCase = true)) return ban()
+            if (v.startsWith("SCORE:", ignoreCase = true)) {
+                val num = v.substringAfter(":").toDoubleOrNull()
+                if (num != null && num.isFinite() && num >= MIN_CUSTOM_SCORE_DELTA) {
+                    return score(num)
+                }
+            }
+            return fromPreset(ReportPunishmentType.fromString(v))
+        }
+
+        private fun formatDelta(delta: Double): String =
+            if (delta % 1.0 == 0.0) {
+                delta.toInt().toString()
+            } else {
+                String.format(java.util.Locale.US, "%.1f", delta)
+            }
     }
 }
 
@@ -59,7 +138,7 @@ data class WatchIncidentReport(
     val targetId: Long,
     val reporterUserId: String,
     val incidentPlace: String,
-    val punishmentType: ReportPunishmentType,
+    val punishment: ReportPunishment,
     val detail: String,
     val createdAt: Long,
 )
@@ -329,7 +408,7 @@ class WatchVoteTicketService(private val database: Database) {
         targetId: Long,
         reporterUserId: String,
         incidentPlace: String,
-        punishmentType: ReportPunishmentType,
+        punishment: ReportPunishment,
         detail: String,
     ): WatchIncidentReport = transaction(database) {
         val now = System.currentTimeMillis()
@@ -339,7 +418,7 @@ class WatchVoteTicketService(private val database: Database) {
             it[WatchIncidentReports.targetId] = targetId
             it[WatchIncidentReports.reporterUserId] = reporterUserId
             it[WatchIncidentReports.incidentPlace] = incidentPlace.take(64)
-            it[WatchIncidentReports.punishmentType] = punishmentType.name
+            it[WatchIncidentReports.punishmentType] = punishment.toStorageValue().take(24)
             it[WatchIncidentReports.detail] = detail.take(1500)
             it[WatchIncidentReports.createdAt] = now
         }[WatchIncidentReports.id]
@@ -351,7 +430,7 @@ class WatchVoteTicketService(private val database: Database) {
             targetId = targetId,
             reporterUserId = reporterUserId,
             incidentPlace = incidentPlace.take(64),
-            punishmentType = punishmentType,
+            punishment = punishment,
             detail = detail.take(1500),
             createdAt = now,
         )
@@ -369,7 +448,7 @@ class WatchVoteTicketService(private val database: Database) {
                     targetId = it[WatchIncidentReports.targetId],
                     reporterUserId = it[WatchIncidentReports.reporterUserId],
                     incidentPlace = it[WatchIncidentReports.incidentPlace],
-                    punishmentType = ReportPunishmentType.fromString(it[WatchIncidentReports.punishmentType]),
+                    punishment = ReportPunishment.fromStorageValue(it[WatchIncidentReports.punishmentType]),
                     detail = it[WatchIncidentReports.detail],
                     createdAt = it[WatchIncidentReports.createdAt],
                 )
