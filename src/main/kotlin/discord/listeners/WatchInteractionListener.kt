@@ -9,6 +9,7 @@ import jp.simplespace.db.ReportPunishmentType
 import jp.simplespace.db.VoteChoice
 import jp.simplespace.db.WatchScoreEvent
 import jp.simplespace.db.WatchScoreEventType
+import jp.simplespace.db.WatchTargetReportConfig
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.commands.watch.WatchAiRuleUi
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
@@ -155,7 +156,11 @@ class WatchInteractionListener : ListenerAdapter() {
                 .build()
         }
 
-        fun buildIncidentReportModal(targetId: Long, targetDisplayName: String): Modal {
+        fun buildIncidentReportModal(
+            targetId: Long,
+            targetDisplayName: String,
+            reportConfig: WatchTargetReportConfig = WatchTargetReportConfig(targetId = targetId, guildId = ""),
+        ): Modal {
             val placeMenu = StringSelectMenu.create("incident_place")
                 .addOption("VC（ボイスチャット）", "VC（ボイスチャット）")
                 .addOption("ゲーム内 / 外部チャット", "ゲーム内 / 外部チャット")
@@ -163,17 +168,34 @@ class WatchInteractionListener : ListenerAdapter() {
                 .setDefaultValues("VC（ボイスチャット）")
                 .build()
 
+            val p1Label = ReportPunishment.score(reportConfig.preset1).displayName
+            val p2Label = ReportPunishment.score(reportConfig.preset2).displayName
+            val p3Label = ReportPunishment.score(reportConfig.preset3).displayName
             val punishmentMenu = StringSelectMenu.create("punishment_type")
-                .addOption(ReportPunishmentType.SCORE_15.displayName, ReportPunishmentType.SCORE_15.name)
-                .addOption(ReportPunishmentType.SCORE_30.displayName, ReportPunishmentType.SCORE_30.name)
-                .addOption(ReportPunishmentType.SCORE_50.displayName, ReportPunishmentType.SCORE_50.name)
+                .addOption(p1Label, "PRESET_1")
+                .addOption(p2Label, "PRESET_2")
+                .addOption(p3Label, "PRESET_3")
                 .addOption(ReportPunishmentType.CUSTOM.displayName, ReportPunishmentType.CUSTOM.name)
                 .addOption(ReportPunishmentType.BAN.displayName, ReportPunishmentType.BAN.name)
-                .setDefaultValues(ReportPunishmentType.SCORE_30.name)
+                .setDefaultValues("PRESET_2")
                 .build()
 
+            val (customLabel, customDesc, customPlaceholder) = if (reportConfig.allowNegativeDelta) {
+                Triple(
+                    "違反度の自由指定（任意・マイナス可）",
+                    "数値を入力するとその変動値が適用されます（-100〜100、0不可）",
+                    "例: 10、-5、12.5（空欄なら上のプリセットを使用）",
+                )
+            } else {
+                Triple(
+                    "違反度の自由加算数（任意）",
+                    "数値を入力するとその加算数が適用されます（0.1〜100）",
+                    "例: 10 や 12.5（空欄なら上のプリセットを使用）",
+                )
+            }
+
             val customScoreInput = TextInput.create("custom_score_delta", TextInputStyle.SHORT)
-                .setPlaceholder("例: 20 や 12.5（0.1〜100。空欄なら上のプリセットを使用）")
+                .setPlaceholder(customPlaceholder)
                 .setMaxLength(10)
                 .setRequired(false)
                 .build()
@@ -190,7 +212,7 @@ class WatchInteractionListener : ListenerAdapter() {
                 .addComponents(
                     Label.of("発生場所・状況", placeMenu),
                     Label.of("提案する処罰内容", punishmentMenu),
-                    Label.of("違反度の自由加算数（任意）", "数値を入力するとその加算数が適用されます（0.1〜100）", customScoreInput),
+                    Label.of(customLabel, customDesc, customScoreInput),
                     Label.of("報告内容", "Botが監視できない場所での問題行動を具体的に記入してください", detailInput),
                 )
                 .build()
@@ -199,21 +221,42 @@ class WatchInteractionListener : ListenerAdapter() {
         fun resolveReportPunishment(
             selectedPresetRaw: String?,
             customDeltaRaw: String?,
+            reportConfig: WatchTargetReportConfig = WatchTargetReportConfig(targetId = 0L, guildId = ""),
         ): Pair<ReportPunishment?, String?> {
-            val preset = ReportPunishmentType.fromString(selectedPresetRaw)
+            val selected = selectedPresetRaw?.trim().orEmpty()
             val customTrimmed = customDeltaRaw?.trim().orEmpty()
             if (customTrimmed.isNotEmpty()) {
-                if (preset == ReportPunishmentType.BAN) {
-                    return null to "「BAN 処刑」と自由指定の違反度加算数は同時に指定できません。数値加算にする場合はプリセットを「自由入力の違反度を加算」にしてください。"
+                if (selected.equals(ReportPunishmentType.BAN.name, ignoreCase = true)) {
+                    return null to "「BAN 処刑」と自由指定の違反度は同時に指定できません。数値指定にする場合はプリセットを「自由入力の違反度変動」にしてください。"
                 }
                 val parsed = ReportPunishment.parseCustomDeltaInput(customTrimmed)
-                    ?: return null to "違反度加算数は `0.1` 〜 `100` の数値で入力してください（例: `20`、`12.5`）。"
+                    ?: return null to if (reportConfig.allowNegativeDelta) {
+                        "違反度の変動値は `-100` 〜 `100`（`0` 不可）の数値で入力してください（例: `10`、`-5`、`12.5`）。"
+                    } else {
+                        "違反度の加算数は `0.1` 〜 `100` の数値で入力してください（例: `10`、`12.5`）。"
+                    }
+                if (parsed < 0.0 && !reportConfig.allowNegativeDelta) {
+                    return null to "この監視対象ユーザーへの違反報告ではマイナス違反度（減算）が許可されていません。"
+                }
                 return ReportPunishment.score(parsed) to null
             }
-            if (preset == ReportPunishmentType.CUSTOM) {
-                return null to "「自由入力の違反度を加算」を選んだ場合は、違反度の自由加算数（`0.1` 〜 `100`）を入力してください。"
+            if (selected.equals(ReportPunishmentType.CUSTOM.name, ignoreCase = true)) {
+                val rangeHint = if (reportConfig.allowNegativeDelta) "`-100` 〜 `100`（`0` 不可）" else "`0.1` 〜 `100`"
+                return null to "「自由入力の違反度変動」を選んだ場合は、下の欄に数値（$rangeHint）を入力してください。"
             }
-            return ReportPunishment.fromPreset(preset) to null
+            if (selected.equals(ReportPunishmentType.BAN.name, ignoreCase = true)) {
+                return ReportPunishment.ban() to null
+            }
+            val chosenDelta = when (selected.uppercase()) {
+                "PRESET_1" -> reportConfig.preset1
+                "PRESET_2" -> reportConfig.preset2
+                "PRESET_3" -> reportConfig.preset3
+                else -> ReportPunishmentType.fromString(selected).scoreDelta.takeIf { it != 0.0 } ?: reportConfig.preset2
+            }
+            if (chosenDelta < 0.0 && !reportConfig.allowNegativeDelta) {
+                return null to "この監視対象ユーザーへの違反報告ではマイナス違反度（減算）が許可されていません。"
+            }
+            return ReportPunishment.score(chosenDelta) to null
         }
     }
 
@@ -412,7 +455,8 @@ class WatchInteractionListener : ListenerAdapter() {
         val displayName = guild.getMemberById(target.userId)?.effectiveName
             ?: guild.jda.getUserById(target.userId)?.effectiveName
             ?: "対象"
-        event.replyModal(buildIncidentReportModal(target.id, displayName)).queue()
+        val reportConfig = watchConfigService.getTargetReportConfig(guild.id, target.id)
+        event.replyModal(buildIncidentReportModal(target.id, displayName, reportConfig)).queue()
     }
 
     private fun handleIncidentReportModalSubmit(
@@ -435,9 +479,11 @@ class WatchInteractionListener : ListenerAdapter() {
         }
 
         val place = event.getValue("incident_place")?.asStringList?.firstOrNull() ?: "VC（ボイスチャット）"
+        val reportConfig = watchConfigService.getTargetReportConfig(guild.id, target.id)
         val (punishment, punishmentError) = resolveReportPunishment(
             selectedPresetRaw = event.getValue("punishment_type")?.asStringList?.firstOrNull(),
             customDeltaRaw = event.getValue("custom_score_delta")?.asString,
+            reportConfig = reportConfig,
         )
         if (punishment == null) {
             event.replyComponents(

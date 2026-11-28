@@ -600,22 +600,65 @@ class WatchSystemTest {
         assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("それはさすがに言い過ぎだろ"))
         assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("マジで不快だからやめて"))
 
-        // 報告モーダルと処罰種別（プリセット + 自由入力）
-        assertEquals(30.0, ReportPunishmentType.SCORE_30.scoreDelta)
-        assertFalse(ReportPunishmentType.SCORE_30.isBan)
+        // 報告モーダルと処罰種別（デフォルト 5% / 10% / 15% + ユーザー別設定 + マイナス許容）
+        assertEquals(5.0, jp.simplespace.db.WatchTargetReportConfig.DEFAULT_PRESET_1)
+        assertEquals(10.0, jp.simplespace.db.WatchTargetReportConfig.DEFAULT_PRESET_2)
+        assertEquals(15.0, jp.simplespace.db.WatchTargetReportConfig.DEFAULT_PRESET_3)
+        assertTrue(jp.simplespace.db.WatchTargetReportConfig.DEFAULT_ALLOW_NEGATIVE)
         assertTrue(ReportPunishmentType.BAN.isBan)
 
-        val custom22 = jp.simplespace.db.ReportPunishment.fromStorageValue(
-            jp.simplespace.db.ReportPunishment.score(22.5).toStorageValue()
-        )
-        assertFalse(custom22.isBan)
-        assertEquals(22.5, custom22.scoreDelta)
-        assertEquals("違反度 +22.5% 加算", custom22.displayName)
+        val defaultCfg = jp.simplespace.db.WatchTargetReportConfig(targetId = 9L, guildId = "g1")
+        val (p1, errP1) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment("PRESET_1", "", defaultCfg)
+        val (p2, errP2) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment("PRESET_2", "", defaultCfg)
+        val (p3, errP3) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment("PRESET_3", "", defaultCfg)
+        assertEquals(null, errP1); assertEquals(5.0, p1?.scoreDelta)
+        assertEquals(null, errP2); assertEquals(10.0, p2?.scoreDelta)
+        assertEquals(null, errP3); assertEquals(15.0, p3?.scoreDelta)
 
-        // 全角・%付き入力のパース
+        // ユーザー別カスタム候補 & マイナス禁止設定
+        val customCfg = jp.simplespace.db.WatchTargetReportConfig(
+            targetId = 9L,
+            guildId = "g1",
+            preset1 = 3.0,
+            preset2 = 8.0,
+            preset3 = 20.0,
+            allowNegativeDelta = false,
+        )
+        val (cp2, errCp2) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment("PRESET_2", "", customCfg)
+        assertEquals(null, errCp2)
+        assertEquals(8.0, cp2?.scoreDelta)
+
+        // マイナス違反度の往復ストレージ・全角パース（デフォルトは許容）
+        val negStored = jp.simplespace.db.ReportPunishment.fromStorageValue(
+            jp.simplespace.db.ReportPunishment.score(-12.5).toStorageValue()
+        )
+        assertFalse(negStored.isBan)
+        assertEquals(-12.5, negStored.scoreDelta)
+        assertEquals("違反度 -12.5% 減算", negStored.displayName)
+
+        val (resolvedNeg, errNeg) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
+            ReportPunishmentType.CUSTOM.name,
+            "－１０％",
+            defaultCfg,
+        )
+        assertEquals(null, errNeg)
+        assertEquals(-10.0, resolvedNeg?.scoreDelta)
+        assertEquals("違反度 -10% 減算", resolvedNeg?.displayName)
+
+        // マイナス禁止設定のユーザーにはエラーになること
+        val (blockedNeg, errBlockedNeg) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
+            ReportPunishmentType.CUSTOM.name,
+            "-5",
+            customCfg,
+        )
+        assertEquals(null, blockedNeg)
+        assertNotNull(errBlockedNeg)
+
+        // 全角・%付きプラス入力のパース
         val (resolvedCustom, errCustom) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
             ReportPunishmentType.CUSTOM.name,
             "＋２５％",
+            defaultCfg,
         )
         assertEquals(null, errCustom)
         assertNotNull(resolvedCustom)
@@ -624,16 +667,18 @@ class WatchSystemTest {
 
         // プリセットのまま自由入力欄に数値を入れた場合は自由入力を優先
         val (resolvedOverride, errOverride) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
-            ReportPunishmentType.SCORE_30.name,
+            "PRESET_2",
             "12.5",
+            defaultCfg,
         )
         assertEquals(null, errOverride)
         assertEquals(12.5, resolvedOverride?.scoreDelta)
 
-        // BAN と自由入力の同時指定や範囲外はエラー
+        // BAN と自由入力の同時指定や空欄はエラー
         val (banConflict, errBan) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
             ReportPunishmentType.BAN.name,
             "20",
+            defaultCfg,
         )
         assertEquals(null, banConflict)
         assertNotNull(errBan)
@@ -641,11 +686,12 @@ class WatchSystemTest {
         val (missingCustom, errMissing) = jp.simplespace.discord.listeners.WatchInteractionListener.resolveReportPunishment(
             ReportPunishmentType.CUSTOM.name,
             "",
+            defaultCfg,
         )
         assertEquals(null, missingCustom)
         assertNotNull(errMissing)
 
-        val modal = jp.simplespace.discord.listeners.WatchInteractionListener.buildIncidentReportModal(9L, "T氏")
+        val modal = jp.simplespace.discord.listeners.WatchInteractionListener.buildIncidentReportModal(9L, "T氏", customCfg)
         assertEquals("watch_report_modal:9", modal.id)
         assertEquals(4, modal.components.size)
 

@@ -8,9 +8,11 @@ import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.AiWeightHint
+import jp.simplespace.db.ReportPunishment
 import jp.simplespace.db.WatchAiRule
 import jp.simplespace.db.WatchRoleCounter
 import jp.simplespace.db.WatchScoreEventType
+import jp.simplespace.db.WatchTargetReportConfig
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
 import jp.simplespace.watch.RoleRestoreService
@@ -48,6 +50,7 @@ class WatchCommand : SlashCommand() {
             WatchTargetAddSub(),
             WatchTargetRemoveSub(),
             WatchTargetListSub(),
+            WatchTargetReportConfigSub(),
             // config グループ
             WatchConfigShowSub(),
             WatchConfigChannelSub(),
@@ -205,6 +208,101 @@ private class WatchTargetListSub : SlashCommand() {
             }.trim()
         }
         replyEph(event, "🛡️ 監視対象メンバー一覧", desc, Color(0x36, 0xB8, 0xFA))
+    }
+}
+
+private class WatchTargetReportConfigSub : SlashCommand() {
+    init {
+        name = "report-config"
+        help = "監視対象ユーザーごとの違反報告候補（%）とマイナス違反度許容を設定・確認します。"
+        subcommandGroup = targetGroup()
+        options = listOf(
+            OptionData(OptionType.USER, "user", "対象の監視メンバー", true),
+            OptionData(OptionType.NUMBER, "preset1", "候補1の違反度変動（%、デフォルト 5）", false).setRequiredRange(-100.0, 100.0),
+            OptionData(OptionType.NUMBER, "preset2", "候補2の違反度変動（%、デフォルト 10）", false).setRequiredRange(-100.0, 100.0),
+            OptionData(OptionType.NUMBER, "preset3", "候補3の違反度変動（%、デフォルト 15）", false).setRequiredRange(-100.0, 100.0),
+            OptionData(OptionType.BOOLEAN, "allow_negative", "マイナス違反度（減算）の報告投票を許容するか（デフォルト true）", false),
+            OptionData(OptionType.BOOLEAN, "reset", "true でデフォルト設定（5% / 10% / 15%、マイナス許容）へ戻す", false),
+        )
+    }
+
+    override fun execute(event: SlashCommandEvent) {
+        val guild = event.guild
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        guild!!
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val targetUser = event.getOption("user")?.asUser ?: return
+        val target = watchConfigService.getTarget(guild.id, targetUser.id, activeOnly = false)
+        if (target == null) {
+            replyEph(event, "エラー", "<@${targetUser.id}> は監視対象に登録されていません。", Color.RED)
+            return
+        }
+
+        val reset = event.getOption("reset")?.asBoolean ?: false
+        val p1 = event.getOption("preset1")?.asDouble?.let { kotlin.math.round(it * 10.0) / 10.0 }
+        val p2 = event.getOption("preset2")?.asDouble?.let { kotlin.math.round(it * 10.0) / 10.0 }
+        val p3 = event.getOption("preset3")?.asDouble?.let { kotlin.math.round(it * 10.0) / 10.0 }
+        val allowNeg = event.getOption("allow_negative")?.asBoolean
+
+        val isModifying = reset || p1 != null || p2 != null || p3 != null || allowNeg != null
+        if (isModifying && WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            replyEph(event, "操作できません", "監視対象者本人は自分の違反報告設定を変更できません。", Color.RED)
+            return
+        }
+
+        if (!isModifying) {
+            val current = watchConfigService.getTargetReportConfig(guild.id, target.id)
+            replyEph(event, "🚨 違反報告設定: ${targetUser.effectiveName}", formatReportConfig(target.userId, current), Color(0x36, 0xB8, 0xFA))
+            return
+        }
+
+        if (reset) {
+            watchConfigService.resetTargetReportConfig(target.id)
+            val defaults = watchConfigService.getTargetReportConfig(guild.id, target.id)
+            replyEph(event, "♻️ 違反報告設定をデフォルトに戻しました", formatReportConfig(target.userId, defaults), Color(0x2E, 0xCC, 0x71))
+            return
+        }
+
+        val current = watchConfigService.getTargetReportConfig(guild.id, target.id)
+        val nextP1 = p1 ?: current.preset1
+        val nextP2 = p2 ?: current.preset2
+        val nextP3 = p3 ?: current.preset3
+        val nextAllowNeg = allowNeg ?: current.allowNegativeDelta
+
+        val invalidZero = listOf(nextP1, nextP2, nextP3).any { kotlin.math.abs(it) < ReportPunishment.MIN_ABS_SCORE_DELTA }
+        if (invalidZero) {
+            replyEph(event, "入力エラー", "候補の数値に `0` は指定できません（絶対値 `0.1` 〜 `100` で指定してください）。", Color.RED)
+            return
+        }
+        if (!nextAllowNeg && listOf(nextP1, nextP2, nextP3).any { it < 0.0 }) {
+            replyEph(event, "入力エラー", "マイナス違反度が禁止（`allow_negative: false`）の状態で、マイナスの候補値は設定できません。", Color.RED)
+            return
+        }
+
+        val updated = watchConfigService.upsertTargetReportConfig(
+            guildId = guild.id,
+            targetId = target.id,
+            preset1 = nextP1,
+            preset2 = nextP2,
+            preset3 = nextP3,
+            allowNegativeDelta = nextAllowNeg,
+        )
+        replyEph(event, "✅ 違反報告設定を更新しました", formatReportConfig(target.userId, updated), Color(0x2E, 0xCC, 0x71))
+    }
+
+    private fun formatReportConfig(userId: String, cfg: WatchTargetReportConfig): String {
+        val p1 = ReportPunishment.score(cfg.preset1).displayName
+        val p2 = ReportPunishment.score(cfg.preset2).displayName
+        val p3 = ReportPunishment.score(cfg.preset3).displayName
+        val negLabel = if (cfg.allowNegativeDelta) "✅ 許容する（減算投票可）" else "🚫 禁止（加算のみ）"
+        return buildString {
+            append("- **対象メンバー**: <@$userId>\n")
+            append("- **候補1**: $p1\n")
+            append("- **候補2（デフォルト選択）**: $p2\n")
+            append("- **候補3**: $p3\n")
+            append("- **マイナス違反度**: $negLabel")
+        }
     }
 }
 

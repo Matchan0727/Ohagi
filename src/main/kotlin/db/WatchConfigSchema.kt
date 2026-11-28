@@ -66,6 +66,26 @@ data class WatchTarget(
 )
 
 @Serializable
+data class WatchTargetReportConfig(
+    val targetId: Long,
+    val guildId: String,
+    val preset1: Double = DEFAULT_PRESET_1,
+    val preset2: Double = DEFAULT_PRESET_2,
+    val preset3: Double = DEFAULT_PRESET_3,
+    val allowNegativeDelta: Boolean = DEFAULT_ALLOW_NEGATIVE,
+    val updatedAt: Long = System.currentTimeMillis(),
+) {
+    fun presets(): List<Double> = listOf(preset1, preset2, preset3)
+
+    companion object {
+        const val DEFAULT_PRESET_1 = 5.0
+        const val DEFAULT_PRESET_2 = 10.0
+        const val DEFAULT_PRESET_3 = 15.0
+        const val DEFAULT_ALLOW_NEGATIVE = true
+    }
+}
+
+@Serializable
 data class WatchRoleCounter(
     val id: Long,
     val guildId: String,
@@ -163,9 +183,21 @@ class WatchConfigService(private val database: Database) {
         }
     }
 
+    object WatchTargetReportConfigs : Table("watch_target_report_configs") {
+        val targetId = long("target_id")
+        val guildId = varchar("guild_id", 64).index("idx_watch_target_report_cfg_guild")
+        val preset1 = double("preset_1").default(WatchTargetReportConfig.DEFAULT_PRESET_1)
+        val preset2 = double("preset_2").default(WatchTargetReportConfig.DEFAULT_PRESET_2)
+        val preset3 = double("preset_3").default(WatchTargetReportConfig.DEFAULT_PRESET_3)
+        val allowNegativeDelta = bool("allow_negative_delta").default(WatchTargetReportConfig.DEFAULT_ALLOW_NEGATIVE)
+        val updatedAt = long("updated_at")
+
+        override val primaryKey = PrimaryKey(targetId)
+    }
+
     init {
         transaction(database) {
-            SchemaUtils.create(WatchGuildConfigs, WatchTargets, WatchTargetRoleCounters)
+            SchemaUtils.create(WatchGuildConfigs, WatchTargets, WatchTargetRoleCounters, WatchTargetReportConfigs)
         }
     }
 
@@ -435,6 +467,78 @@ class WatchConfigService(private val database: Database) {
             updatedAt = this[WatchGuildConfigs.updatedAt],
         )
     }
+
+    fun getTargetReportConfig(guildId: String, targetId: Long): WatchTargetReportConfig = transaction(database) {
+        WatchTargetReportConfigs.selectAll()
+            .where { WatchTargetReportConfigs.targetId eq targetId }
+            .singleOrNull()
+            ?.toTargetReportConfig()
+            ?: WatchTargetReportConfig(targetId = targetId, guildId = guildId)
+    }
+
+    fun upsertTargetReportConfig(
+        guildId: String,
+        targetId: Long,
+        preset1: Double? = null,
+        preset2: Double? = null,
+        preset3: Double? = null,
+        allowNegativeDelta: Boolean? = null,
+    ): WatchTargetReportConfig = transaction(database) {
+        val now = System.currentTimeMillis()
+        val current = WatchTargetReportConfigs.selectAll()
+            .where { WatchTargetReportConfigs.targetId eq targetId }
+            .singleOrNull()
+            ?.toTargetReportConfig()
+        val nextP1 = preset1 ?: current?.preset1 ?: WatchTargetReportConfig.DEFAULT_PRESET_1
+        val nextP2 = preset2 ?: current?.preset2 ?: WatchTargetReportConfig.DEFAULT_PRESET_2
+        val nextP3 = preset3 ?: current?.preset3 ?: WatchTargetReportConfig.DEFAULT_PRESET_3
+        val nextAllowNeg = allowNegativeDelta ?: current?.allowNegativeDelta ?: WatchTargetReportConfig.DEFAULT_ALLOW_NEGATIVE
+
+        if (current != null) {
+            WatchTargetReportConfigs.update({ WatchTargetReportConfigs.targetId eq targetId }) {
+                it[WatchTargetReportConfigs.preset1] = nextP1
+                it[WatchTargetReportConfigs.preset2] = nextP2
+                it[WatchTargetReportConfigs.preset3] = nextP3
+                it[WatchTargetReportConfigs.allowNegativeDelta] = nextAllowNeg
+                it[WatchTargetReportConfigs.updatedAt] = now
+            }
+        } else {
+            WatchTargetReportConfigs.insert {
+                it[WatchTargetReportConfigs.targetId] = targetId
+                it[WatchTargetReportConfigs.guildId] = guildId
+                it[WatchTargetReportConfigs.preset1] = nextP1
+                it[WatchTargetReportConfigs.preset2] = nextP2
+                it[WatchTargetReportConfigs.preset3] = nextP3
+                it[WatchTargetReportConfigs.allowNegativeDelta] = nextAllowNeg
+                it[WatchTargetReportConfigs.updatedAt] = now
+            }
+        }
+        WatchTargetReportConfig(
+            targetId = targetId,
+            guildId = guildId,
+            preset1 = nextP1,
+            preset2 = nextP2,
+            preset3 = nextP3,
+            allowNegativeDelta = nextAllowNeg,
+            updatedAt = now,
+        )
+    }
+
+    fun resetTargetReportConfig(targetId: Long) {
+        transaction(database) {
+            WatchTargetReportConfigs.deleteWhere { WatchTargetReportConfigs.targetId eq targetId }
+        }
+    }
+
+    private fun ResultRow.toTargetReportConfig(): WatchTargetReportConfig = WatchTargetReportConfig(
+        targetId = this[WatchTargetReportConfigs.targetId],
+        guildId = this[WatchTargetReportConfigs.guildId],
+        preset1 = this[WatchTargetReportConfigs.preset1],
+        preset2 = this[WatchTargetReportConfigs.preset2],
+        preset3 = this[WatchTargetReportConfigs.preset3],
+        allowNegativeDelta = this[WatchTargetReportConfigs.allowNegativeDelta],
+        updatedAt = this[WatchTargetReportConfigs.updatedAt],
+    )
 
     private fun ResultRow.toTarget(): WatchTarget = WatchTarget(
         id = this[WatchTargets.id],

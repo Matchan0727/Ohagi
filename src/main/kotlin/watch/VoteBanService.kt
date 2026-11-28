@@ -379,8 +379,12 @@ object VoteBanService {
         }
 
         val yesLabel = if (report != null) "👍 賛成 (${report.punishment.displayName}) [${tally.yesCount}]" else "👍 賛成 (BAN) [${tally.yesCount}]"
-        val yesBtn = Button.danger("voteban_yes:${vote.id}", yesLabel.take(80))
-            .withDisabled(vote.status != WatchVoteStatus.OPEN)
+        val isPositiveReduction = report != null && !report.punishment.isBan && report.punishment.scoreDelta < 0.0
+        val yesBtn = (if (isPositiveReduction) {
+            Button.success("voteban_yes:${vote.id}", yesLabel.take(80))
+        } else {
+            Button.danger("voteban_yes:${vote.id}", yesLabel.take(80))
+        }).withDisabled(vote.status != WatchVoteStatus.OPEN)
         val noBtn = Button.secondary("voteban_no:${vote.id}", "👎 反対 [${tally.noCount}]")
             .withDisabled(vote.status != WatchVoteStatus.OPEN)
 
