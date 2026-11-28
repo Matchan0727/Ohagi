@@ -47,7 +47,7 @@ enum class WatchScoreEventType(val displayName: String) {
     DECAY("時間減衰"),
     MANUAL_ADJUST("手動調整"),
     APPEAL_ADJUST("異議申し立て見直し"),
-    VOTE_BAN("投票BAN可決"),
+    VOTE_BAN("投票処罰可決"),
     TICKET_BAN("処刑チケット行使"),
     BANNED("BAN執行");
 
@@ -494,6 +494,16 @@ class WatchCycleService(private val database: Database) {
             .orderBy(WatchScoreEvents.createdAt, SortOrder.DESC)
             .limit(limit)
             .map { it.toEvent() }
+    }
+
+    fun hasViolationForSourceMessage(targetId: Long, sourceMessageId: String): Boolean = transaction(database) {
+        !WatchScoreEvents.selectAll()
+            .where {
+                (WatchScoreEvents.targetId eq targetId) and
+                    (WatchScoreEvents.eventType eq WatchScoreEventType.AI_VIOLATION.name) and
+                    (WatchScoreEvents.sourceMessageId eq sourceMessageId)
+            }
+            .empty()
     }
 
     fun getEventsForTargetSince(targetId: Long, sinceMillis: Long?): List<WatchScoreEvent> = transaction(database) {

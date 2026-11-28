@@ -106,6 +106,12 @@ object ModerationPromptBuilder {
             appendLine("- 検知内容: ${request.spamMetricsSummary}")
         }
 
+        if (!request.triggerNote.isNullOrBlank()) {
+            appendLine()
+            appendLine("## 審査トリガー補足")
+            appendLine(request.triggerNote)
+        }
+
         if (request.attachments.isNotEmpty()) {
             appendLine()
             appendLine("## 添付ファイル一覧")

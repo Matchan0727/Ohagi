@@ -98,6 +98,7 @@ class MessageBatchBuffer(
     private val batches = ConcurrentHashMap<String, PendingBatch>()
     private val cadenceTrackers = ConcurrentHashMap<String, UserCadenceTracker>()
     private val spamDetector = SpamDetector()
+    private val reevaluatedMessageIds = ConcurrentHashMap<String, Long>()
 
     companion object {
         // 適応型バッチングのパラメータ
@@ -122,7 +123,25 @@ class MessageBatchBuffer(
         internal const val MAX_FILE_BYTES = 8L * 1024L * 1024L          // 1ファイル最大 8MB
         internal const val MAX_TOTAL_BATCH_BYTES = 15L * 1024L * 1024L  // 1バッチ合計最大 15MB
         internal const val MAX_ATTACHMENTS_PER_BATCH = 4                // 1バッチ最大 4ファイル
+        internal const val REPLY_REEVAL_MAX_AGE_MILLIS = 60L * 60_000L  // 事後再評価は直近1時間以内の発言のみ
         private val URL_ONLY_REGEX = Regex("""^https?://\S+$""", RegexOption.IGNORE_CASE)
+        private val CASUAL_LAUGH_OR_ACK_REGEX = Regex(
+            """^(?:[wｗ草笑]+|[!！?？。、…・]+|わかる|それな|たしかに|ほんとそれ|ありがとう|あり|おつ|おつかれ|おけ|りょ|りょうかい|了解|ok|okay|lol|lmao|gg|nice|thx|草生える|ワロタ|わろた)+$""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val SHORT_NEGATIVE_HINT_REGEX = Regex(
+            """は？|は\?|え？|え\?|きも|キモ|うざ|ウザ|やめ|不快|ひど|酷|最悪|やば|無理|黙|だま|消え|しね|死ね|ふざけ""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        internal fun shouldSkipReplyReevaluation(replyText: String): Boolean {
+            val trimmed = replyText.trim()
+            if (trimmed.isEmpty()) return true
+            if (SHORT_NEGATIVE_HINT_REGEX.containsMatchIn(trimmed)) return false
+            if (CASUAL_LAUGH_OR_ACK_REGEX.matches(trimmed)) return true
+            if (trimmed.length <= 2) return true
+            return false
+        }
 
         /**
          * 過去の連投間隔サンプルから、75パーセンタイル × 余裕係数(1.35) で
@@ -367,6 +386,151 @@ class MessageBatchBuffer(
         if (toFlushNow != null) {
             OhagiBot.scope.launch {
                 evaluateBatch(toFlushNow, window)
+            }
+        }
+    }
+
+    /**
+     * 他メンバーが監視対象ユーザーの直近発言（1時間以内）へ返信（Reply）した際に、
+     * 未処罰かつ未再評価であれば、その反応を踏まえて元発言を1回だけ事後再審査する。
+     */
+    suspend fun onReplyToTargetMessage(replyMessage: Message) {
+        if (!replyMessage.isFromGuild || replyMessage.author.isBot) return
+        val refMessage = replyMessage.referencedMessage ?: return
+        if (refMessage.author.isBot) return
+        if (refMessage.author.id == replyMessage.author.id) return
+
+        val guild = replyMessage.guild
+        if (!WatchPermissions.isFeatureEnabled(guild.id)) return
+
+        val config = watchConfigService.getOrCreateConfig(guild.id)
+        if (!config.aiEnabled) return
+
+        val channelId = replyMessage.channel.id
+        if (channelId in config.excludedChannelIds) return
+        if (watchConfigService.isDedicatedChannel(guild.id, channelId)) return
+
+        val target = watchConfigService.getTarget(guild.id, refMessage.author.id, activeOnly = true) ?: return
+        val currentCycle = target.currentCycleId?.let { watchCycleService.getCycleById(it) } ?: return
+        if (currentCycle.status != WatchCycleStatus.ACTIVE) return
+
+        val replyText = replyMessage.contentDisplay.trim()
+        if (shouldSkipReplyReevaluation(replyText)) return
+
+        val now = System.currentTimeMillis()
+        val refAgeMillis = now - refMessage.timeCreated.toInstant().toEpochMilli()
+        if (refAgeMillis < 0L || refAgeMillis > REPLY_REEVAL_MAX_AGE_MILLIS) return
+
+        // 現在まだバッチ待機中のメッセージなら通常バッチ側の「直後反応」に含まれるためスキップ
+        val batchKey = "${guild.id}:$channelId:${target.userId}"
+        val pendingBatch = batches[batchKey]
+        if (pendingBatch != null && pendingBatch.messages.any { it.messageId == refMessage.id }) {
+            return
+        }
+
+        // すでにAI違反として処罰済みなら二重処罰防止のためスキップ
+        if (watchCycleService.hasViolationForSourceMessage(target.id, refMessage.id)) {
+            return
+        }
+
+        // 1元発言につき事後再評価は最大1回まで（古いキャッシュは定期掃除）
+        if (reevaluatedMessageIds.size > 2000) {
+            val cutoff = now - REPLY_REEVAL_MAX_AGE_MILLIS * 2
+            reevaluatedMessageIds.entries.removeIf { it.value < cutoff }
+        }
+        if (reevaluatedMessageIds.putIfAbsent(refMessage.id, now) != null) {
+            return
+        }
+
+        val aiClient = aiClientProvider()
+        if (aiClient == null || !aiClient.isConfigured) return
+        val channel = guild.getChannelById(GuildMessageChannel::class.java, channelId) ?: return
+
+        val beforeContext = runCatching {
+            channel.getHistoryBefore(refMessage.id, 8)
+                .complete()
+                .retrievedHistory
+                .asReversed()
+                .filter { !it.author.isBot && (it.contentDisplay.isNotBlank() || it.attachments.isNotEmpty()) }
+                .map { toContextMessage(it, target.userId, ContextMessage.POSITION_BEFORE) }
+        }.getOrDefault(emptyList())
+
+        val afterReplyContext = listOf(
+            toContextMessage(replyMessage, target.userId, ContextMessage.POSITION_DURING_OR_AFTER)
+        )
+
+        val refText = refMessage.contentDisplay.trim()
+        val refSummary = buildMessageSummary(refText, refMessage.attachments, refMessage.stickers.map { it.name })
+            .ifBlank { "(空メッセージ)" }
+        val urlCandidates = (extractEmbedImageUrls(refMessage) + UrlImageFetcher.extractDirectImageUrls(refText)).distinct()
+        val moderationAttachments = downloadBatchAttachments(refMessage.attachments, urlCandidates)
+
+        val rules = watchAiService.listRulesForEvaluation(guild.id, target.id)
+        val feedbacks = watchAiService.getFewShotFeedbacks(guild.id, target.id, limit = 12)
+        val taskCfg = watchAiService.getTaskConfig(guild.id, AiTaskType.MODERATION)
+        val targetDisplayName = guild.getMemberById(target.userId)?.effectiveName
+            ?: guild.jda.getUserById(target.userId)?.effectiveName
+            ?: target.userId
+        val replierName = replyMessage.member?.effectiveName ?: replyMessage.author.effectiveName
+
+        val evalReq = ModerationEvaluationRequest(
+            guildName = guild.name,
+            channelName = channel.name,
+            targetUserId = target.userId,
+            targetDisplayName = targetDisplayName,
+            personaNote = target.personaNote,
+            rules = rules,
+            feedbacks = feedbacks,
+            contextMessages = beforeContext + afterReplyContext,
+            targetMessages = listOf(refSummary),
+            attachments = moderationAttachments,
+            triggerNote = "他メンバー（${replierName}）が監視対象の過去発言へ後から返信したため、この反応を踏まえて元発言を再審査してください。" +
+                "返信が不快感・苦言・注意ではなく通常の会話や好意的な冗談であれば、必ず違反なし(violations=[])にしてください。",
+            overrideModel = taskCfg?.modelName,
+            overrideThinkingLevel = taskCfg?.thinkingLevel,
+        )
+
+        OhagiBot.logger.info(
+            "他メンバーの返信を契機に事後再評価を実行: guild={}, target={}, refMsgId={}, replier={}",
+            guild.id,
+            target.userId,
+            refMessage.id,
+            replyMessage.author.id,
+        )
+
+        val (result, rawJson) = aiClient.evaluate(evalReq) ?: return
+        val detectedViolations = result.resolvedViolations()
+        if (detectedViolations.isEmpty()) return
+
+        val entries = detectedViolations.mapNotNull { v ->
+            val delta = v.computeFinalDelta(config.aiSensitivity, config.aiMaxDeltaPerEval)
+            if (delta <= 0.0) return@mapNotNull null
+            BatchViolationEntry(
+                delta = delta,
+                category = v.category.take(32),
+                reason = v.reasonJa.ifBlank { "他メンバーの反応により不適切発言と判定" },
+                sourceChannelId = channelId,
+                sourceMessageId = refMessage.id,
+                sourceMessageExcerpt = refSummary.take(500),
+                aiRawJson = rawJson,
+            )
+        }
+        if (entries.isEmpty()) return
+
+        val applied = WatchOrchestrator.applyBatchViolations(guild, target, entries) ?: return
+        val (_, recordedEvents) = applied
+        val representative = recordedEvents.maxByOrNull { it.delta } ?: recordedEvents.last()
+
+        val victimId = result.victimUserId?.trim()?.takeIf { it.isNotEmpty() && it != target.userId }
+        if (result.suggestBanTicket && victimId != null) {
+            val victimExists = victimId == replyMessage.author.id ||
+                beforeContext.any { it.authorId == victimId } ||
+                guild.getMemberById(victimId) != null
+            if (victimExists) {
+                val ticketReason = result.ticketReasonJa?.takeIf { it.isNotBlank() }
+                    ?: representative.reason?.takeIf { it.isNotBlank() }
+                    ?: "特定メンバーへの重大な問題発言"
+                onTicketSuggested(guild, target, victimId, ticketReason, representative.id, refSummary.take(500))
             }
         }
     }

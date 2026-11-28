@@ -1,8 +1,11 @@
 package jp.simplespace.watch
 
 import jp.simplespace.db.BanTriggerType
+import jp.simplespace.db.ReportPunishmentType
 import jp.simplespace.db.VoteChoice
 import jp.simplespace.db.WatchCycleStatus
+import jp.simplespace.db.WatchIncidentReport
+import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.db.WatchTarget
 import jp.simplespace.db.WatchVote
 import jp.simplespace.db.WatchVoteStatus
@@ -110,6 +113,93 @@ object VoteBanService {
         )
     }
 
+    /**
+     * 専用チャンネルの「🚨 違反を報告」ボタンから、VC等のBot監視外インシデントに対する処罰投票を開始する。
+     */
+    fun startIncidentReportVote(
+        guild: Guild,
+        fallbackChannel: TextChannel,
+        target: WatchTarget,
+        reporterUserId: String,
+        incidentPlace: String,
+        punishmentType: ReportPunishmentType,
+        detail: String,
+    ): StartVoteResult {
+        val config = watchConfigService.getOrCreateConfig(guild.id)
+        if (!config.voteEnabled) {
+            return StartVoteResult(false, "このサーバーではメンバー投票機能が無効になっています。")
+        }
+        if (reporterUserId == target.userId) {
+            return StartVoteResult(false, "監視対象者本人が自分を報告することはできません。")
+        }
+        val cycle = target.currentCycleId?.let { watchCycleService.getCycleById(it) }
+        if (cycle == null || cycle.status != WatchCycleStatus.ACTIVE) {
+            return StartVoteResult(false, "対象メンバーは現在アクティブな監視状態ではないため報告投票を開始できません。")
+        }
+        val existingOpen = watchVoteTicketService.getOpenVoteForTarget(target.id)
+        if (existingOpen != null) {
+            return StartVoteResult(false, "対象メンバーに対する投票（ID: `#${existingOpen.id}`）がすでに進行中です。")
+        }
+        val lastRejected = watchVoteTicketService.getLastRejectedVoteForTarget(target.id)
+        if (lastRejected?.closedAt != null) {
+            val cooldownEnd = lastRejected.closedAt + config.voteCooldownMinutes * 60_000L
+            if (System.currentTimeMillis() < cooldownEnd) {
+                return StartVoteResult(
+                    false,
+                    "前回の投票が否決されたため、再発議は <t:${cooldownEnd / 1000L}:R> 以降に可能です。",
+                )
+            }
+        }
+
+        val postChannelId = watchConfigService.resolveStatusChannelId(target, config) ?: fallbackChannel.id
+        val postChannel = guild.getTextChannelById(postChannelId) ?: fallbackChannel
+        val expiresAt = System.currentTimeMillis() + config.voteDurationMinutes.coerceAtLeast(1) * 60_000L
+        val formattedReason = "[$incidentPlace] $detail"
+
+        val vote = watchVoteTicketService.createVote(
+            guildId = guild.id,
+            targetId = target.id,
+            cycleId = cycle.id,
+            initiatorUserId = reporterUserId,
+            reason = formattedReason,
+            channelId = postChannel.id,
+            expiresAt = expiresAt,
+        )
+        val report = watchVoteTicketService.createIncidentReport(
+            voteId = vote.id,
+            guildId = guild.id,
+            targetId = target.id,
+            reporterUserId = reporterUserId,
+            incidentPlace = incidentPlace,
+            punishmentType = punishmentType,
+            detail = detail,
+        )
+
+        val tally = watchVoteTicketService.castBallot(vote.id, reporterUserId, VoteChoice.YES)
+        val container = buildVoteContainer(vote, target, tally, config.voteMinYesVotes, config.votePassRatio, report)
+        val sent = runCatching {
+            postChannel.sendMessageComponents(container)
+                .setAllowedMentions(emptyList())
+                .useComponentsV2()
+                .complete()
+        }.onFailure {
+            OhagiBot.logger.error("報告投票メッセージ送信エラー: voteId={}", vote.id, it)
+        }.getOrNull()
+
+        if (sent != null) {
+            watchVoteTicketService.updateVoteMessageId(vote.id, sent.id)
+        }
+
+        val savedVote = vote.copy(messageId = sent?.id)
+        scheduleVoteClose(guild, savedVote, target)
+
+        return StartVoteResult(
+            success = true,
+            message = "<#${postChannel.id}> に違反報告と処罰投票（ID: `#${vote.id}` / 提案: **${punishmentType.displayName}**）を開始しました。",
+            vote = savedVote,
+        )
+    }
+
     fun castVote(
         guild: Guild,
         voteId: Long,
@@ -185,18 +275,35 @@ object VoteBanService {
         val finalStatus = if (passed) WatchVoteStatus.PASSED else WatchVoteStatus.REJECTED
 
         val closed = watchVoteTicketService.closeVote(voteId, finalStatus) ?: return
-        updateVoteMessage(guild, closed, target, tally, config.voteMinYesVotes, config.votePassRatio)
+        val report = watchVoteTicketService.getIncidentReportByVoteId(voteId)
+        updateVoteMessage(guild, closed, target, tally, config.voteMinYesVotes, config.votePassRatio, report)
 
         if (passed) {
-            val detail = "投票#${voteId}可決（賛成${tally.yesCount} / 反対${tally.noCount}）: ${vote.reason}"
-            WatchOrchestrator.triggerExternalBan(
-                guild = guild,
-                target = target,
-                triggerType = BanTriggerType.VOTE,
-                triggerDetail = detail,
-                useLastWords = config.voteUseLastWords,
-                actorUserId = vote.initiatorUserId,
-            )
+            if (report != null && !report.punishmentType.isBan) {
+                val detail = "報告投票#${voteId}可決（賛成${tally.yesCount}/反対${tally.noCount}）[${report.incidentPlace}]: ${report.detail.take(120)}"
+                WatchOrchestrator.applyScoreChange(
+                    guild = guild,
+                    target = target,
+                    eventType = WatchScoreEventType.VOTE_BAN,
+                    delta = report.punishmentType.scoreDelta,
+                    category = "REPORT_VOTE",
+                    reason = detail,
+                    sourceChannelId = vote.channelId,
+                    sourceMessageId = vote.messageId,
+                    sourceMessageExcerpt = "[${report.incidentPlace}] ${report.detail}".take(500),
+                    actorUserId = vote.initiatorUserId,
+                )
+            } else {
+                val detail = "投票#${voteId}可決（賛成${tally.yesCount} / 反対${tally.noCount}）: ${vote.reason}"
+                WatchOrchestrator.triggerExternalBan(
+                    guild = guild,
+                    target = target,
+                    triggerType = BanTriggerType.VOTE,
+                    triggerDetail = detail,
+                    useLastWords = config.voteUseLastWords,
+                    actorUserId = vote.initiatorUserId,
+                )
+            }
         }
     }
 
@@ -213,10 +320,11 @@ object VoteBanService {
         tally: WatchVoteTally,
         minYesVotes: Int,
         passRatio: Double,
+        report: WatchIncidentReport? = watchVoteTicketService.getIncidentReportByVoteId(vote.id),
     ) {
         val messageId = vote.messageId ?: return
         val channel = guild.getTextChannelById(vote.channelId) ?: return
-        val container = buildVoteContainer(vote, target, tally, minYesVotes, passRatio)
+        val container = buildVoteContainer(vote, target, tally, minYesVotes, passRatio, report)
         channel.editMessageComponentsById(messageId, container)
             .setAllowedMentions(emptyList())
             .useComponentsV2()
@@ -232,21 +340,30 @@ object VoteBanService {
         tally: WatchVoteTally,
         minYesVotes: Int,
         passRatio: Double,
+        report: WatchIncidentReport? = null,
     ): Container {
         val ratioPct = String.format(Locale.US, "%.0f%%", tally.yesRatio * 100.0)
         val requiredPct = String.format(Locale.US, "%.0f%%", passRatio * 100.0)
+        val isReportVote = report != null
+        val kindName = if (isReportVote) "🚨 違反報告・処罰投票" else "🗳️ メンバー投票BAN"
         val (title, accent) = when (vote.status) {
-            WatchVoteStatus.OPEN -> "🗳️ メンバー投票BAN（進行中 #${vote.id}）" to Color(0xE6, 0x7E, 0x22)
-            WatchVoteStatus.PASSED -> "🔨 メンバー投票BAN【可決】(#${vote.id})" to Color(0xE7, 0x4C, 0x3C)
-            WatchVoteStatus.REJECTED -> "🛡️ メンバー投票BAN【否決】(#${vote.id})" to Color(0x2E, 0xCC, 0x71)
-            WatchVoteStatus.CANCELLED -> "⛔ メンバー投票BAN【中止】(#${vote.id})" to Color.GRAY
+            WatchVoteStatus.OPEN -> "$kindName（進行中 #${vote.id}）" to Color(0xE6, 0x7E, 0x22)
+            WatchVoteStatus.PASSED -> "🔨 $kindName【可決】(#${vote.id})" to Color(0xE7, 0x4C, 0x3C)
+            WatchVoteStatus.REJECTED -> "🛡️ $kindName【否決】(#${vote.id})" to Color(0x2E, 0xCC, 0x71)
+            WatchVoteStatus.CANCELLED -> "⛔ $kindName【中止】(#${vote.id})" to Color.GRAY
         }
 
         val body = buildString {
             append("## $title\n")
             append("- **対象メンバー**: <@${target.userId}>\n")
-            append("- **発議者**: <@${vote.initiatorUserId}>\n")
-            append("- **理由**: ${vote.reason}\n")
+            append("- **${if (isReportVote) "報告者" else "発議者"}**: <@${vote.initiatorUserId}>\n")
+            if (report != null) {
+                append("- **発生場所**: ${report.incidentPlace}\n")
+                append("- **提案処罰**: **${report.punishmentType.displayName}**\n")
+                append("- **報告内容**: ${report.detail}\n")
+            } else {
+                append("- **理由**: ${vote.reason}\n")
+            }
             append("- **集計**: 👍 賛成 **${tally.yesCount}票** / 👎 反対 **${tally.noCount}票**（賛成率: **$ratioPct**）\n")
             append("- **可決条件**: 賛成 **${minYesVotes}票以上** かつ 賛成率 **${requiredPct}以上**\n")
             if (vote.status == WatchVoteStatus.OPEN) {
@@ -256,7 +373,8 @@ object VoteBanService {
             }
         }
 
-        val yesBtn = Button.danger("voteban_yes:${vote.id}", "👍 賛成 (BAN) [${tally.yesCount}]")
+        val yesLabel = if (report != null) "👍 賛成 (${report.punishmentType.displayName}) [${tally.yesCount}]" else "👍 賛成 (BAN) [${tally.yesCount}]"
+        val yesBtn = Button.danger("voteban_yes:${vote.id}", yesLabel.take(80))
             .withDisabled(vote.status != WatchVoteStatus.OPEN)
         val noBtn = Button.secondary("voteban_no:${vote.id}", "👎 反対 [${tally.noCount}]")
             .withDisabled(vote.status != WatchVoteStatus.OPEN)

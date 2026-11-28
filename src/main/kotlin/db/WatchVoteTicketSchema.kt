@@ -35,6 +35,35 @@ enum class VoteChoice {
     }
 }
 
+enum class ReportPunishmentType(
+    val displayName: String,
+    val scoreDelta: Double,
+    val isBan: Boolean,
+) {
+    SCORE_15("違反度 +15% 加算", 15.0, false),
+    SCORE_30("違反度 +30% 加算", 30.0, false),
+    SCORE_50("違反度 +50% 加算", 50.0, false),
+    BAN("BAN 処刑", 0.0, true);
+
+    companion object {
+        fun fromString(v: String?): ReportPunishmentType =
+            entries.firstOrNull { it.name.equals(v, ignoreCase = true) } ?: SCORE_30
+    }
+}
+
+@Serializable
+data class WatchIncidentReport(
+    val id: Long,
+    val voteId: Long,
+    val guildId: String,
+    val targetId: Long,
+    val reporterUserId: String,
+    val incidentPlace: String,
+    val punishmentType: ReportPunishmentType,
+    val detail: String,
+    val createdAt: Long,
+)
+
 enum class TicketIssueSource {
     MANUAL,
     AI_APPROVED,
@@ -152,9 +181,23 @@ class WatchVoteTicketService(private val database: Database) {
         override val primaryKey = PrimaryKey(id)
     }
 
+    object WatchIncidentReports : Table("watch_incident_reports") {
+        val id = long("id").autoIncrement()
+        val voteId = long("vote_id").uniqueIndex("uq_watch_incident_reports_vote")
+        val guildId = varchar("guild_id", 64).index("idx_watch_incident_reports_guild")
+        val targetId = long("target_id").index("idx_watch_incident_reports_target")
+        val reporterUserId = varchar("reporter_user_id", 64)
+        val incidentPlace = varchar("incident_place", 64)
+        val punishmentType = varchar("punishment_type", 24)
+        val detail = text("detail")
+        val createdAt = long("created_at")
+
+        override val primaryKey = PrimaryKey(id)
+    }
+
     init {
         transaction(database) {
-            SchemaUtils.create(WatchVotes, WatchVoteBallots, WatchBanTickets)
+            SchemaUtils.create(WatchVotes, WatchVoteBallots, WatchBanTickets, WatchIncidentReports)
         }
     }
 
@@ -279,6 +322,59 @@ class WatchVoteTicketService(private val database: Database) {
             }
             WatchVotes.selectAll().where { WatchVotes.id eq voteId }.singleOrNull()?.toVote()
         }
+
+    fun createIncidentReport(
+        voteId: Long,
+        guildId: String,
+        targetId: Long,
+        reporterUserId: String,
+        incidentPlace: String,
+        punishmentType: ReportPunishmentType,
+        detail: String,
+    ): WatchIncidentReport = transaction(database) {
+        val now = System.currentTimeMillis()
+        val id = WatchIncidentReports.insert {
+            it[WatchIncidentReports.voteId] = voteId
+            it[WatchIncidentReports.guildId] = guildId
+            it[WatchIncidentReports.targetId] = targetId
+            it[WatchIncidentReports.reporterUserId] = reporterUserId
+            it[WatchIncidentReports.incidentPlace] = incidentPlace.take(64)
+            it[WatchIncidentReports.punishmentType] = punishmentType.name
+            it[WatchIncidentReports.detail] = detail.take(1500)
+            it[WatchIncidentReports.createdAt] = now
+        }[WatchIncidentReports.id]
+
+        WatchIncidentReport(
+            id = id,
+            voteId = voteId,
+            guildId = guildId,
+            targetId = targetId,
+            reporterUserId = reporterUserId,
+            incidentPlace = incidentPlace.take(64),
+            punishmentType = punishmentType,
+            detail = detail.take(1500),
+            createdAt = now,
+        )
+    }
+
+    fun getIncidentReportByVoteId(voteId: Long): WatchIncidentReport? = transaction(database) {
+        WatchIncidentReports.selectAll()
+            .where { WatchIncidentReports.voteId eq voteId }
+            .singleOrNull()
+            ?.let {
+                WatchIncidentReport(
+                    id = it[WatchIncidentReports.id],
+                    voteId = it[WatchIncidentReports.voteId],
+                    guildId = it[WatchIncidentReports.guildId],
+                    targetId = it[WatchIncidentReports.targetId],
+                    reporterUserId = it[WatchIncidentReports.reporterUserId],
+                    incidentPlace = it[WatchIncidentReports.incidentPlace],
+                    punishmentType = ReportPunishmentType.fromString(it[WatchIncidentReports.punishmentType]),
+                    detail = it[WatchIncidentReports.detail],
+                    createdAt = it[WatchIncidentReports.createdAt],
+                )
+            }
+    }
 
     fun createTicket(
         guildId: String,

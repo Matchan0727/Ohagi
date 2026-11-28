@@ -28,8 +28,11 @@ class WatchEventListener(
                 val consumedAsAppeal = WatchAppealService.handlePossibleAppeal(message)
                 if (consumedAsAppeal) return@launch
 
-                // 3. 通常のAI違反監視バッチへ投入
+                // 3. 通常のAI違反監視バッチへ投入（監視対象本人の発言）
                 messageBatchBuffer.onGuildMessage(message)
+
+                // 4. 他メンバーから監視対象メッセージへの後追い返信による事後再評価
+                messageBatchBuffer.onReplyToTargetMessage(message)
             } catch (e: Exception) {
                 OhagiBot.logger.error("WatchEventListener メッセージ処理中にエラー", e)
             }

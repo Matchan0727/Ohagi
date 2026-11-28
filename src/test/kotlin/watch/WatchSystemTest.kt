@@ -15,6 +15,7 @@ import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.AppealDecision
+import jp.simplespace.db.ReportPunishmentType
 import jp.simplespace.db.TicketIssueSource
 import jp.simplespace.db.TicketStatus
 import jp.simplespace.db.WatchAiFeedback
@@ -582,5 +583,30 @@ class WatchSystemTest {
         )
         assertEquals("gemini-4-argon", dbOverridden.model)
         assertEquals("HIGH", dbOverridden.thinkingLevel)
+    }
+
+    @Test
+    fun testReplyReevaluationFilterAndIncidentReportModal() {
+        // 軽い笑い・肯定的な相槌はスキップ
+        assertTrue(MessageBatchBuffer.shouldSkipReplyReevaluation("草"))
+        assertTrue(MessageBatchBuffer.shouldSkipReplyReevaluation("www"))
+        assertTrue(MessageBatchBuffer.shouldSkipReplyReevaluation("わかる"))
+        assertTrue(MessageBatchBuffer.shouldSkipReplyReevaluation("ありがとう"))
+        assertTrue(MessageBatchBuffer.shouldSkipReplyReevaluation("あ"))
+
+        // 不快・苦言・通常長文の返信は事後再評価の対象
+        assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("は？"))
+        assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("きも"))
+        assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("それはさすがに言い過ぎだろ"))
+        assertFalse(MessageBatchBuffer.shouldSkipReplyReevaluation("マジで不快だからやめて"))
+
+        // 報告モーダルと処罰種別
+        assertEquals(30.0, ReportPunishmentType.SCORE_30.scoreDelta)
+        assertFalse(ReportPunishmentType.SCORE_30.isBan)
+        assertTrue(ReportPunishmentType.BAN.isBan)
+
+        val modal = jp.simplespace.discord.listeners.WatchInteractionListener.buildIncidentReportModal(9L, "T氏")
+        assertEquals("watch_report_modal:9", modal.id)
+        assertEquals(3, modal.components.size)
     }
 }

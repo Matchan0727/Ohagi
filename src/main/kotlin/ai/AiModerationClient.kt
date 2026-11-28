@@ -54,6 +54,7 @@ data class ModerationEvaluationRequest(
     val targetMessages: List<String>,
     val attachments: List<ModerationAttachment> = emptyList(),
     val spamMetricsSummary: String? = null,
+    val triggerNote: String? = null,
     val overrideModel: String? = null,
     val overrideThinkingLevel: String? = null,
 )

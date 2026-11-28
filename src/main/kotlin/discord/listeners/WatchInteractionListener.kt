@@ -3,6 +3,7 @@ package jp.simplespace.discord.listeners
 import jp.simplespace.ai.GeminiClientSettings
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
+import jp.simplespace.db.ReportPunishmentType
 import jp.simplespace.db.VoteChoice
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.commands.watch.WatchAiRuleUi
@@ -21,14 +22,20 @@ import kotlinx.coroutines.launch
 import net.dv8tion.jda.api.components.actionrow.ActionRow
 import net.dv8tion.jda.api.components.buttons.Button
 import net.dv8tion.jda.api.components.container.Container
+import net.dv8tion.jda.api.components.label.Label
+import net.dv8tion.jda.api.components.selections.StringSelectMenu
 import net.dv8tion.jda.api.components.separator.Separator
 import net.dv8tion.jda.api.components.textdisplay.TextDisplay
+import net.dv8tion.jda.api.components.textinput.TextInput
+import net.dv8tion.jda.api.components.textinput.TextInputStyle
+import net.dv8tion.jda.api.entities.channel.concrete.TextChannel
 import net.dv8tion.jda.api.events.interaction.ModalInteractionEvent
 import net.dv8tion.jda.api.events.interaction.command.CommandAutoCompleteInteractionEvent
 import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent
 import net.dv8tion.jda.api.events.interaction.component.StringSelectInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import net.dv8tion.jda.api.interactions.commands.Command
+import net.dv8tion.jda.api.modals.Modal
 import java.awt.Color
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -37,6 +44,40 @@ class WatchInteractionListener : ListenerAdapter() {
     companion object {
         private const val REFRESH_COOLDOWN_MILLIS = 30_000L
         private val lastRefreshByTarget = ConcurrentHashMap<Long, Long>()
+        const val MODAL_REPORT_PREFIX = "watch_report_modal:"
+
+        fun buildIncidentReportModal(targetId: Long, targetDisplayName: String): Modal {
+            val placeMenu = StringSelectMenu.create("incident_place")
+                .addOption("VC（ボイスチャット）", "VC（ボイスチャット）")
+                .addOption("ゲーム内 / 外部チャット", "ゲーム内 / 外部チャット")
+                .addOption("その他（Bot監視外）", "その他（Bot監視外）")
+                .setDefaultValues("VC（ボイスチャット）")
+                .build()
+
+            val punishmentMenu = StringSelectMenu.create("punishment_type")
+                .addOption(ReportPunishmentType.SCORE_15.displayName, ReportPunishmentType.SCORE_15.name)
+                .addOption(ReportPunishmentType.SCORE_30.displayName, ReportPunishmentType.SCORE_30.name)
+                .addOption(ReportPunishmentType.SCORE_50.displayName, ReportPunishmentType.SCORE_50.name)
+                .addOption(ReportPunishmentType.BAN.displayName, ReportPunishmentType.BAN.name)
+                .setDefaultValues(ReportPunishmentType.SCORE_30.name)
+                .build()
+
+            val detailInput = TextInput.create("report_detail", TextInputStyle.PARAGRAPH)
+                .setPlaceholder("例: VCで試合後にAさんへ暴言を吐いていた")
+                .setMinLength(3)
+                .setMaxLength(1000)
+                .setRequired(true)
+                .build()
+
+            val safeName = targetDisplayName.take(20)
+            return Modal.create("$MODAL_REPORT_PREFIX$targetId", "🚨 $safeName の違反報告（投票開始）")
+                .addComponents(
+                    Label.of("発生場所・状況", placeMenu),
+                    Label.of("提案する処罰内容", punishmentMenu),
+                    Label.of("報告内容", "Botが監視できない場所での問題行動を具体的に記入してください", detailInput),
+                )
+                .build()
+        }
     }
 
     override fun onCommandAutoCompleteInteraction(event: CommandAutoCompleteInteractionEvent) {
@@ -121,6 +162,10 @@ class WatchInteractionListener : ListenerAdapter() {
 
     override fun onModalInteraction(event: ModalInteractionEvent) {
         val guild = event.guild ?: return
+        if (event.modalId.startsWith(MODAL_REPORT_PREFIX)) {
+            handleIncidentReportModalSubmit(event, guild)
+            return
+        }
         if (!event.modalId.startsWith(WatchAiRuleUi.MODAL_EDIT_PREFIX)) return
         if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
         if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
@@ -181,6 +226,7 @@ class WatchInteractionListener : ListenerAdapter() {
             id.startsWith("watch_graph:") -> handleGraphOpen(event, guild, id)
             id.startsWith("watch_graph_range:") -> handleGraphSwitch(event, guild, id)
             id.startsWith("watch_logs:") -> handleLogsView(event, guild, id)
+            id.startsWith("watch_report:") -> handleReportButton(event, guild, id.substringAfter("watch_report:").toLongOrNull())
             id.startsWith("watch_refresh:") -> handleBoardRefresh(event, guild, id.substringAfter("watch_refresh:").toLongOrNull())
             id.startsWith("voteban_yes:") -> handleVoteBallot(event, guild, id.substringAfter("voteban_yes:").toLongOrNull(), VoteChoice.YES)
             id.startsWith("voteban_no:") -> handleVoteBallot(event, guild, id.substringAfter("voteban_no:").toLongOrNull(), VoteChoice.NO)
@@ -196,6 +242,79 @@ class WatchInteractionListener : ListenerAdapter() {
                 ).useComponentsV2().queue()
             }
         }
+    }
+
+    private fun handleReportButton(
+        event: ButtonInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+        targetId: Long?,
+    ) {
+        if (targetId == null) return
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id || !target.active) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "対象の監視データが見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        if (event.user.id == target.userId) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("操作できません", "監視対象者本人は自分を報告できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        val displayName = guild.getMemberById(target.userId)?.effectiveName
+            ?: guild.jda.getUserById(target.userId)?.effectiveName
+            ?: "対象"
+        event.replyModal(buildIncidentReportModal(target.id, displayName)).queue()
+    }
+
+    private fun handleIncidentReportModalSubmit(
+        event: ModalInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+    ) {
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        val targetId = event.modalId.substringAfter(MODAL_REPORT_PREFIX).toLongOrNull() ?: return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id || !target.active) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "対象の監視データが見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        val fallbackChannel = event.channel as? TextChannel
+        if (fallbackChannel == null) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "テキストチャンネル内で実行してください。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val place = event.getValue("incident_place")?.asStringList?.firstOrNull() ?: "VC（ボイスチャット）"
+        val punishment = ReportPunishmentType.fromString(
+            event.getValue("punishment_type")?.asStringList?.firstOrNull()
+        )
+        val detail = event.getValue("report_detail")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+        if (detail == null) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("入力エラー", "報告内容を入力してください。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val result = VoteBanService.startIncidentReportVote(
+            guild = guild,
+            fallbackChannel = fallbackChannel,
+            target = target,
+            reporterUserId = event.user.id,
+            incidentPlace = place,
+            punishmentType = punishment,
+            detail = detail,
+        )
+        event.replyComponents(
+            simpleTitleAndDescriptionContainer(
+                if (result.success) "🚨 違反報告＆処罰投票を開始しました" else "開始できませんでした",
+                result.message,
+                if (result.success) Color(0x2E, 0xCC, 0x71) else Color.RED,
+            )
+        ).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
     }
 
     private fun handleBoardRefresh(

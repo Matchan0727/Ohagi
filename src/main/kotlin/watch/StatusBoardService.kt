@@ -231,6 +231,14 @@ object StatusBoardService {
 
         val isActive = cycle.status == WatchCycleStatus.ACTIVE
         val canReposition = cycle.status == WatchCycleStatus.ACTIVE || cycle.status == WatchCycleStatus.PENDING_BAN
+        val reportBtn = Button.danger(
+            "watch_report:${target.id}",
+            "🚨 違反を報告",
+        ).withDisabled(!isActive)
+        val refreshBtn = Button.secondary(
+            "watch_refresh:${target.id}",
+            "🔄 再配置",
+        ).withDisabled(!canReposition)
         val globalBtn = Button.danger(
             "ticket_board_global:${target.id}",
             "🌐 全体チケット使用 (${globalTicketCount}枚)",
@@ -239,17 +247,16 @@ object StatusBoardService {
             "ticket_board_personal:${target.id}",
             "🎟️ 個人チケット使用",
         ).withDisabled(!isActive)
-        val refreshBtn = Button.secondary(
-            "watch_refresh:${target.id}",
-            "🔄 再配置",
-        ).withDisabled(!canReposition)
 
-        val buttons = listOf(
+        val primaryRow = ActionRow.of(
             Button.primary("watch_graph:${target.id}:${GraphRange.WEEK_1.key}", "📊 グラフを見る"),
             Button.secondary("watch_logs:${target.id}:0", "📋 違反ログ"),
+            reportBtn,
+            refreshBtn,
+        )
+        val ticketRow = ActionRow.of(
             globalBtn,
             personalBtn,
-            refreshBtn,
         )
 
         return Container.of(
@@ -257,7 +264,8 @@ object StatusBoardService {
             MediaGallery.of(MediaGalleryItem.fromFile(fileUpload)),
             TextDisplay.of(detailText),
             Separator.createInvisible(Separator.Spacing.SMALL),
-            ActionRow.of(buttons),
+            primaryRow,
+            ticketRow,
         ).withAccentColor(accent)
     }
 
