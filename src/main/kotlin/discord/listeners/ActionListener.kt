@@ -1,9 +1,10 @@
 package jp.simplespace.discord.listeners
 
 import calendar.CalendarInfoGenerator
-import jp.simplespace.commandPermissionService
+import jp.simplespace.db.FeatureKey
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
+import jp.simplespace.guildFeatureService
 import kotlinx.coroutines.launch
 import net.dv8tion.jda.api.events.interaction.component.ButtonInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
@@ -40,11 +41,12 @@ class ActionListener : ListenerAdapter() {
         event: ButtonInteractionEvent,
         generator: suspend () -> net.dv8tion.jda.api.components.container.Container,
     ) {
-        if (!commandPermissionService.isAllowed("calendar", event)) {
+        val guildId = event.guild?.id
+        if (guildId == null || !guildFeatureService.isEnabled(guildId, FeatureKey.CALENDAR)) {
             event.replyComponents(
                 simpleTitleAndDescriptionContainer(
                     "利用できません",
-                    "このサーバーまたはチャンネルでは `/calendar` を使用できません。",
+                    "このサーバーでは `/calendar` 機能が無効になっています。",
                     Color.RED,
                 )
             )

@@ -21,6 +21,16 @@ enum class FeatureKey(
         key = "watch_system",
         displayName = "メンバー監視・処罰システム",
         description = "監視対象の違反度可視化・AI判定・遺言BAN・投票・処刑チケット・時間減衰機能",
+    ),
+    CALENDAR(
+        key = "calendar",
+        displayName = "カレンダー表示 (/calendar)",
+        description = "予定カレンダーの表示・更新コマンド (/calendar)",
+    ),
+    RVC(
+        key = "rvc",
+        displayName = "RVC/UVR 音声処理 (/rvc)",
+        description = "RVC/UVRによる音声分離・変換・カバー生成コマンド (/rvc)",
     );
 
     companion object {

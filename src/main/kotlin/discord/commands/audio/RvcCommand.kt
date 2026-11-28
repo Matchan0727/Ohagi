@@ -4,8 +4,10 @@ import com.jagrosh.jdautilities.command.SlashCommand
 import com.jagrosh.jdautilities.command.SlashCommandEvent
 import dev.minn.jda.ktx.interactions.components.FileDisplay
 import jp.simplespace.audio.RvcApiClient
+import jp.simplespace.db.FeatureKey
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
+import jp.simplespace.guildFeatureService
 import kotlinx.coroutines.launch
 import net.dv8tion.jda.api.components.container.Container
 import net.dv8tion.jda.api.components.textdisplay.TextDisplay
@@ -39,7 +41,7 @@ class RvcCommand(rvcApiClient: RvcApiClient) : SlashCommand() {
             ConvertCommand(rvcApiClient),
             CoverCommand(rvcApiClient),
         )
-        this.contexts = InteractionContextType.ALL.toTypedArray()
+        this.contexts = arrayOf(InteractionContextType.GUILD)
     }
 
     override fun execute(event: SlashCommandEvent) {}
@@ -48,6 +50,24 @@ class RvcCommand(rvcApiClient: RvcApiClient) : SlashCommand() {
 private abstract class RvcChildCommand(
     protected val rvcApiClient: RvcApiClient,
 ) : SlashCommand() {
+
+    protected fun ensureFeatureEnabledOrReply(event: SlashCommandEvent): Boolean {
+        val guildId = event.guild?.id
+        if (guildId == null || !guildFeatureService.isEnabled(guildId, FeatureKey.RVC)) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer(
+                    "利用できません",
+                    "このサーバーでは `/rvc` 機能が無効になっています。",
+                    Color.RED,
+                )
+            )
+                .useComponentsV2()
+                .setEphemeral(true)
+                .queue()
+            return false
+        }
+        return true
+    }
 
     protected fun requireAttachment(event: SlashCommandEvent): Message.Attachment {
         return event.optAttachment("file")
@@ -89,6 +109,7 @@ private abstract class RvcChildCommand(
         event: SlashCommandEvent,
         block: suspend (InteractionHook) -> Unit,
     ) {
+        if (!ensureFeatureEnabledOrReply(event)) return
         event.deferReply().queue { hook ->
             OhagiBot.scope.launch {
                 try {

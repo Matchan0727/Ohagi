@@ -13,7 +13,6 @@ class ModCommand(config: ApplicationConfig) : SlashCommand() {
             ShutdownMod(),
             EvalMod(),
             SQLMod(config.config("db")),
-            CalendarConfigMod(),
             FeatureEnableMod(),
             FeatureDisableMod(),
             FeatureListMod(),

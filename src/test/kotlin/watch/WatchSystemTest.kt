@@ -734,5 +734,9 @@ class WatchSystemTest {
         assertEquals("222", parsedLink.channelId)
         assertEquals("333", parsedLink.messageId)
         assertEquals(null, WatchOrchestrator.parseDiscordMessageLink("これはただのテキスト発言"))
+
+        // FeatureKey に calendar / rvc が統合されていること
+        assertEquals(jp.simplespace.db.FeatureKey.CALENDAR, jp.simplespace.db.FeatureKey.fromKey("calendar"))
+        assertEquals(jp.simplespace.db.FeatureKey.RVC, jp.simplespace.db.FeatureKey.fromKey("rvc"))
     }
 }
