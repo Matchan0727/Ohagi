@@ -496,6 +496,17 @@ class WatchCycleService(private val database: Database) {
             .map { it.toEvent() }
     }
 
+    fun getRecentAiViolationsForTarget(targetId: Long, limit: Int = 24): List<WatchScoreEvent> = transaction(database) {
+        WatchScoreEvents.selectAll()
+            .where {
+                (WatchScoreEvents.targetId eq targetId) and
+                    (WatchScoreEvents.eventType eq WatchScoreEventType.AI_VIOLATION.name)
+            }
+            .orderBy(WatchScoreEvents.createdAt, SortOrder.DESC)
+            .limit(limit)
+            .map { it.toEvent() }
+    }
+
     fun hasViolationForSourceMessage(targetId: Long, sourceMessageId: String): Boolean = transaction(database) {
         !WatchScoreEvents.selectAll()
             .where {

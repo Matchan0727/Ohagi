@@ -881,12 +881,23 @@ private class WatchAiFeedbackSub : SlashCommand() {
                         diffNote = String.format(Locale.US, "\n- 現在違反度にも `%s%.1f%%` 補正反映しました。", sign, diff)
                     }
                 }
+                var reevalNote = ""
+                if (verdict == AiFeedbackVerdict.MISSED && sourceEvent == null && target != null) {
+                    val reeval = WatchOrchestrator.reevaluateMissedFeedback(
+                        guild = guild,
+                        target = target,
+                        feedback = fb,
+                        rawInputText = messageContent,
+                    )
+                    reevalNote = "\n- 🔄 **見逃し再審査**: ${reeval.summaryJa}"
+                }
                 hook.editOriginalComponents(
                     simpleTitleAndDescriptionContainer(
                         "🧠 AIフィードバックを登録しました",
                         "フィードバック **`#${fb.id}`** を保存しました。以降のAI推論時に Few-shot 事例として自動参照されます。\n" +
                             "- **評価**: ${verdict.displayName}（元 `$originalDelta` → 望ましい値 `$expectedDelta`）" +
-                            diffNote,
+                            diffNote +
+                            reevalNote,
                         Color(0x2E, 0xCC, 0x71),
                     )
                 ).useComponentsV2().queue()

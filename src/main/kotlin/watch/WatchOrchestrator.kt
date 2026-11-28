@@ -1,6 +1,11 @@
 package jp.simplespace.watch
 
+import jp.simplespace.ai.AiModerationClient
+import jp.simplespace.ai.ContextMessage
+import jp.simplespace.ai.ModerationEvaluationRequest
+import jp.simplespace.db.AiTaskType
 import jp.simplespace.db.BanTriggerType
+import jp.simplespace.db.WatchAiFeedback
 import jp.simplespace.db.WatchCycle
 import jp.simplespace.db.WatchCycleStatus
 import jp.simplespace.db.WatchScoreEvent
@@ -8,6 +13,7 @@ import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.db.WatchTarget
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
+import jp.simplespace.watchAiService
 import jp.simplespace.watchConfigService
 import jp.simplespace.watchCycleService
 import kotlinx.coroutines.sync.Mutex
@@ -16,7 +22,9 @@ import net.dv8tion.jda.api.Permission
 import net.dv8tion.jda.api.entities.Guild
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.entities.UserSnowflake
+import net.dv8tion.jda.api.entities.channel.middleman.GuildMessageChannel
 import java.awt.Color
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -36,8 +44,198 @@ data class BatchViolationEntry(
     val aiRawJson: String?,
 )
 
+data class ParsedDiscordMessageLink(
+    val guildId: String,
+    val channelId: String,
+    val messageId: String,
+)
+
+data class MissedFeedbackReevaluationResult(
+    val executed: Boolean,
+    val appliedEvents: List<WatchScoreEvent> = emptyList(),
+    val updatedScore: Double? = null,
+    val summaryJa: String,
+)
+
 object WatchOrchestrator {
     private val locks = ConcurrentHashMap<String, Mutex>()
+    private val DISCORD_MESSAGE_LINK_REGEX = Regex(
+        """https?://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)"""
+    )
+
+    fun parseDiscordMessageLink(text: String): ParsedDiscordMessageLink? {
+        val m = DISCORD_MESSAGE_LINK_REGEX.find(text.trim()) ?: return null
+        return ParsedDiscordMessageLink(
+            guildId = m.groupValues[1],
+            channelId = m.groupValues[2],
+            messageId = m.groupValues[3],
+        )
+    }
+
+    /**
+     * 見逃し（MISSED）フィードバックが登録された際、対象発言をAIで再審査し、
+     * 違反と判定された場合は現在サイクルの違反スコアへ即座に反映する。
+     */
+    suspend fun reevaluateMissedFeedback(
+        guild: Guild,
+        target: WatchTarget,
+        feedback: WatchAiFeedback,
+        rawInputText: String,
+        aiClient: AiModerationClient? = OhagiBot.aiModerationClient,
+    ): MissedFeedbackReevaluationResult {
+        val latestTarget = watchConfigService.getTargetById(target.id)
+        if (latestTarget == null || !latestTarget.active) {
+            return MissedFeedbackReevaluationResult(
+                executed = false,
+                summaryJa = "対象メンバーは現在アクティブな監視対象ではないため、再審査によるスコア反映はスキップしました。",
+            )
+        }
+        val currentCycle = latestTarget.currentCycleId?.let { watchCycleService.getCycleById(it) }
+        if (currentCycle == null || currentCycle.status != WatchCycleStatus.ACTIVE) {
+            return MissedFeedbackReevaluationResult(
+                executed = false,
+                summaryJa = "対象メンバーは現在アクティブな監視サイクル中ではないため、再審査によるスコア反映はスキップしました。",
+            )
+        }
+        if (aiClient == null || !aiClient.isConfigured) {
+            return MissedFeedbackReevaluationResult(
+                executed = false,
+                summaryJa = "AIクライアントが未設定のため、再審査はスキップしました。",
+            )
+        }
+
+        // Discordメッセージリンクが入力された場合、同一サーバーの実メッセージと周辺文脈を取得
+        var resolvedText = rawInputText.trim()
+        var sourceChannelId: String? = null
+        var sourceMessageId: String? = null
+        var channelName = "missed-feedback"
+        var contextMessages: List<ContextMessage> = emptyList()
+
+        val link = parseDiscordMessageLink(resolvedText)
+        if (link != null && link.guildId == guild.id) {
+            val ch = guild.getChannelById(GuildMessageChannel::class.java, link.channelId)
+            val fetched = ch?.let {
+                runCatching { it.retrieveMessageById(link.messageId).complete() }.getOrNull()
+            }
+            if (fetched != null) {
+                if (fetched.author.id == latestTarget.userId &&
+                    watchCycleService.hasViolationForSourceMessage(latestTarget.id, fetched.id)
+                ) {
+                    return MissedFeedbackReevaluationResult(
+                        executed = false,
+                        summaryJa = "リンク先のメッセージはすでにAI違反として処罰済みのため、二重加点を防ぐため再審査をスキップしました。",
+                    )
+                }
+                channelName = ch.name
+                sourceChannelId = ch.id
+                sourceMessageId = fetched.id
+                val fetchedText = fetched.contentDisplay.trim()
+                if (fetchedText.isNotBlank()) {
+                    resolvedText = fetchedText
+                }
+                contextMessages = runCatching {
+                    ch.getHistoryBefore(fetched.id, 8)
+                        .complete()
+                        .retrievedHistory
+                        .asReversed()
+                        .filter { !it.author.isBot && it.contentDisplay.isNotBlank() }
+                        .map { msg ->
+                            ContextMessage(
+                                authorName = msg.member?.effectiveName ?: msg.author.effectiveName,
+                                authorId = msg.author.id,
+                                isTarget = msg.author.id == latestTarget.userId,
+                                content = msg.contentDisplay.trim().take(400),
+                                timestampEpochSec = msg.timeCreated.toEpochSecond(),
+                                position = ContextMessage.POSITION_BEFORE,
+                            )
+                        }
+                }.getOrDefault(emptyList())
+            }
+        }
+
+        val config = watchConfigService.getOrCreateConfig(guild.id)
+        val rules = watchAiService.listRulesForEvaluation(guild.id, latestTarget.id)
+        val feedbacks = watchAiService.getFewShotFeedbacks(guild.id, latestTarget.id, limit = 12)
+        val taskCfg = watchAiService.getTaskConfig(guild.id, AiTaskType.MODERATION)
+        val targetDisplayName = guild.getMemberById(latestTarget.userId)?.effectiveName
+            ?: guild.jda.getUserById(latestTarget.userId)?.effectiveName
+            ?: latestTarget.userId
+
+        val notePart = feedback.note?.takeIf { it.isNotBlank() }?.let { " / 管理者補足: $it" }.orEmpty()
+        val triggerNote = String.format(
+            Locale.US,
+            "管理者から「AIの見逃し（MISSED）」としてフィードバック #%d が報告されたため、この発言を再審査してください。" +
+                "管理者からの目安増分: +%.1f%%%s。サーバールールとフィードバックを踏まえて適切に違反判定・スコア算出を行ってください。",
+            feedback.id,
+            feedback.expectedDelta,
+            notePart,
+        )
+
+        val evalReq = ModerationEvaluationRequest(
+            guildName = guild.name,
+            channelName = channelName,
+            targetUserId = latestTarget.userId,
+            targetDisplayName = targetDisplayName,
+            personaNote = latestTarget.personaNote,
+            rules = rules,
+            feedbacks = feedbacks,
+            contextMessages = contextMessages,
+            targetMessages = listOf(resolvedText.take(1000)),
+            triggerNote = triggerNote,
+            overrideModel = taskCfg?.modelName,
+            overrideThinkingLevel = taskCfg?.thinkingLevel,
+        )
+
+        val evaluated = aiClient.evaluate(evalReq)
+            ?: return MissedFeedbackReevaluationResult(
+                executed = true,
+                summaryJa = "再審査のAI呼び出しに失敗しました（フィードバック自体は保存済みです）。",
+            )
+
+        val (result, rawJson) = evaluated
+        val detectedViolations = result.resolvedViolations()
+        val entries = detectedViolations.mapNotNull { v ->
+            val delta = v.computeFinalDelta(config.aiSensitivity, config.aiMaxDeltaPerEval)
+            if (delta <= 0.0) return@mapNotNull null
+            BatchViolationEntry(
+                delta = delta,
+                category = v.category.take(32),
+                reason = "[見逃し再審査 #${feedback.id}] ${v.reasonJa.ifBlank { "見逃し報告により違反と判定" }}",
+                sourceChannelId = sourceChannelId,
+                sourceMessageId = sourceMessageId,
+                sourceMessageExcerpt = resolvedText.take(500),
+                aiRawJson = rawJson,
+            )
+        }
+        if (entries.isEmpty()) {
+            return MissedFeedbackReevaluationResult(
+                executed = true,
+                summaryJa = "再審査を実行しましたが、AIは追加の違反なし（`+0.0%`）と判断しました。",
+            )
+        }
+
+        val applied = applyBatchViolations(guild, latestTarget, entries)
+            ?: return MissedFeedbackReevaluationResult(
+                executed = true,
+                summaryJa = "再審査で違反を検知しましたが、現在サイクルの状態によりスコア反映できませんでした。",
+            )
+        val (updatedCycle, recordedEvents) = applied
+        val totalDelta = recordedEvents.sumOf { it.delta }
+        val eventIds = recordedEvents.joinToString(", ") { "#${it.id}" }
+        return MissedFeedbackReevaluationResult(
+            executed = true,
+            appliedEvents = recordedEvents,
+            updatedScore = updatedCycle.currentScore,
+            summaryJa = String.format(
+                Locale.US,
+                "再審査で違反を **%d件** 検知し、違反度に **`+%.1f%%`** 反映しました（現在違反度: **%.1f%%** / イベント: %s）。",
+                recordedEvents.size,
+                totalDelta,
+                updatedCycle.currentScore,
+                eventIds,
+            ),
+        )
+    }
 
     suspend fun <T> withTargetLock(guildId: String, userId: String, block: suspend () -> T): T {
         val mutex = locks.computeIfAbsent("$guildId:$userId") { Mutex() }

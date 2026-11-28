@@ -1,11 +1,14 @@
 package jp.simplespace.discord.listeners
 
 import jp.simplespace.ai.GeminiClientSettings
+import jp.simplespace.db.AiFeedbackVerdict
 import jp.simplespace.db.AiRuleType
 import jp.simplespace.db.AiWeightHint
 import jp.simplespace.db.ReportPunishment
 import jp.simplespace.db.ReportPunishmentType
 import jp.simplespace.db.VoteChoice
+import jp.simplespace.db.WatchScoreEvent
+import jp.simplespace.db.WatchScoreEventType
 import jp.simplespace.discord.OhagiBot
 import jp.simplespace.discord.commands.watch.WatchAiRuleUi
 import jp.simplespace.discord.utils.simpleTitleAndDescriptionContainer
@@ -46,6 +49,111 @@ class WatchInteractionListener : ListenerAdapter() {
         private const val REFRESH_COOLDOWN_MILLIS = 30_000L
         private val lastRefreshByTarget = ConcurrentHashMap<Long, Long>()
         const val MODAL_REPORT_PREFIX = "watch_report_modal:"
+        const val SELECT_FEEDBACK_PREFIX = "watch_feedback_select:"
+        const val MODAL_FEEDBACK_PREFIX = "watch_feedback_modal:"
+
+        fun parseFeedbackExpectedDelta(raw: String?): Double? {
+            if (raw.isNullOrBlank()) return null
+            val normalized = buildString {
+                for (ch in raw.trim()) {
+                    when (ch) {
+                        in '０'..'９' -> append(('0'.code + (ch.code - '０'.code)).toChar())
+                        '．' -> append('.')
+                        '＋' -> append('+')
+                        '％' -> append('%')
+                        ' ', '　' -> Unit
+                        else -> append(ch)
+                    }
+                }
+            }.removePrefix("+").removeSuffix("%")
+            val parsed = normalized.toDoubleOrNull() ?: return null
+            if (!parsed.isFinite() || parsed < 0.0 || parsed > 25.0) return null
+            return kotlin.math.round(parsed * 10.0) / 10.0
+        }
+
+        fun buildFeedbackModalForEvent(
+            targetId: Long,
+            targetDisplayName: String,
+            sourceEvent: WatchScoreEvent,
+        ): Modal {
+            val verdictMenu = StringSelectMenu.create("feedback_verdict")
+                .addOption("過剰判定 / 誤爆 (FALSE_POSITIVE)", AiFeedbackVerdict.FALSE_POSITIVE.name)
+                .addOption("甘すぎた (UNDERESTIMATED)", AiFeedbackVerdict.UNDERESTIMATED.name)
+                .addOption("見逃し (MISSED)", AiFeedbackVerdict.MISSED.name)
+                .addOption("適正判定 (CORRECT)", AiFeedbackVerdict.CORRECT.name)
+                .setDefaultValues(AiFeedbackVerdict.FALSE_POSITIVE.name)
+                .build()
+
+            val expectedInput = TextInput.create("feedback_expected_delta", TextInputStyle.SHORT)
+                .setPlaceholder(String.format(Locale.US, "例: 0 や 10（現在: +%.1f%% / 0〜25）", sourceEvent.delta))
+                .setMaxLength(10)
+                .setRequired(true)
+                .build()
+
+            val applyDiffMenu = StringSelectMenu.create("feedback_apply_diff")
+                .addOption("学習のみ（現在違反度は変更しない）", "NO")
+                .addOption("元スコアとの差分を現在違反度にも補正反映する", "YES")
+                .setDefaultValues("NO")
+                .build()
+
+            val noteInput = TextInput.create("feedback_note", TextInputStyle.PARAGRAPH)
+                .setPlaceholder("例: 仲間内の冗談であり攻撃性はないため誤爆")
+                .setMaxLength(500)
+                .setRequired(false)
+                .build()
+
+            val safeName = targetDisplayName.take(15)
+            return Modal.create("$MODAL_FEEDBACK_PREFIX$targetId:${sourceEvent.id}", "🧠 $safeName #${sourceEvent.id} フィードバック")
+                .addComponents(
+                    Label.of("判定の評価", verdictMenu),
+                    Label.of("望ましかったスコア増分（0〜25）", expectedInput),
+                    Label.of("現在違反度への差分補正", applyDiffMenu),
+                    Label.of("補足説明（任意）", "なぜその評価になるかを書くと以降のAI精度が向上します", noteInput),
+                )
+                .build()
+        }
+
+        fun buildFeedbackModalManual(
+            targetId: Long,
+            targetDisplayName: String,
+        ): Modal {
+            val verdictMenu = StringSelectMenu.create("feedback_verdict")
+                .addOption("見逃し (MISSED)", AiFeedbackVerdict.MISSED.name)
+                .addOption("過剰判定 / 誤爆 (FALSE_POSITIVE)", AiFeedbackVerdict.FALSE_POSITIVE.name)
+                .addOption("甘すぎた (UNDERESTIMATED)", AiFeedbackVerdict.UNDERESTIMATED.name)
+                .addOption("適正判定 (CORRECT)", AiFeedbackVerdict.CORRECT.name)
+                .setDefaultValues(AiFeedbackVerdict.MISSED.name)
+                .build()
+
+            val expectedInput = TextInput.create("feedback_expected_delta", TextInputStyle.SHORT)
+                .setPlaceholder("例: 10 や 15（0〜25）")
+                .setMaxLength(10)
+                .setRequired(true)
+                .build()
+
+            val messageInput = TextInput.create("feedback_message_text", TextInputStyle.PARAGRAPH)
+                .setPlaceholder("見逃された発言テキスト、またはDiscordのメッセージリンクを入力")
+                .setMinLength(1)
+                .setMaxLength(500)
+                .setRequired(true)
+                .build()
+
+            val noteInput = TextInput.create("feedback_note", TextInputStyle.PARAGRAPH)
+                .setPlaceholder("例: 遠回しな煽り表現なので中程度の違反として検知してほしい")
+                .setMaxLength(500)
+                .setRequired(false)
+                .build()
+
+            val safeName = targetDisplayName.take(16)
+            return Modal.create("$MODAL_FEEDBACK_PREFIX$targetId:manual", "🧠 $safeName へのAIフィードバック")
+                .addComponents(
+                    Label.of("判定の評価", verdictMenu),
+                    Label.of("望ましかったスコア増分（0〜25）", expectedInput),
+                    Label.of("対象の発言テキスト", messageInput),
+                    Label.of("補足説明（任意）", "なぜその評価になるかを書くと以降のAI精度が向上します", noteInput),
+                )
+                .build()
+        }
 
         fun buildIncidentReportModal(targetId: Long, targetDisplayName: String): Modal {
             val placeMenu = StringSelectMenu.create("incident_place")
@@ -167,6 +275,10 @@ class WatchInteractionListener : ListenerAdapter() {
 
     override fun onStringSelectInteraction(event: StringSelectInteractionEvent) {
         val guild = event.guild ?: return
+        if (event.componentId.startsWith(SELECT_FEEDBACK_PREFIX)) {
+            handleFeedbackEventSelect(event, guild)
+            return
+        }
         if (event.componentId != WatchAiRuleUi.SELECT_EDIT_ID) return
         if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
         if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
@@ -193,6 +305,10 @@ class WatchInteractionListener : ListenerAdapter() {
         val guild = event.guild ?: return
         if (event.modalId.startsWith(MODAL_REPORT_PREFIX)) {
             handleIncidentReportModalSubmit(event, guild)
+            return
+        }
+        if (event.modalId.startsWith(MODAL_FEEDBACK_PREFIX)) {
+            handleFeedbackModalSubmit(event, guild)
             return
         }
         if (!event.modalId.startsWith(WatchAiRuleUi.MODAL_EDIT_PREFIX)) return
@@ -256,6 +372,7 @@ class WatchInteractionListener : ListenerAdapter() {
             id.startsWith("watch_graph_range:") -> handleGraphSwitch(event, guild, id)
             id.startsWith("watch_logs:") -> handleLogsView(event, guild, id)
             id.startsWith("watch_report:") -> handleReportButton(event, guild, id.substringAfter("watch_report:").toLongOrNull())
+            id.startsWith("watch_feedback:") -> handleFeedbackButton(event, guild, id.substringAfter("watch_feedback:").toLongOrNull())
             id.startsWith("watch_refresh:") -> handleBoardRefresh(event, guild, id.substringAfter("watch_refresh:").toLongOrNull())
             id.startsWith("voteban_yes:") -> handleVoteBallot(event, guild, id.substringAfter("voteban_yes:").toLongOrNull(), VoteChoice.YES)
             id.startsWith("voteban_no:") -> handleVoteBallot(event, guild, id.substringAfter("voteban_no:").toLongOrNull(), VoteChoice.NO)
@@ -351,6 +468,221 @@ class WatchInteractionListener : ListenerAdapter() {
                 if (result.success) Color(0x2E, 0xCC, 0x71) else Color.RED,
             )
         ).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
+    }
+
+    private fun handleFeedbackButton(
+        event: ButtonInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+        targetId: Long?,
+    ) {
+        if (targetId == null) return
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "対象の監視データが見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        if (WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("操作できません", "監視対象者本人は自分の判定に対してフィードバックを登録できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val displayName = guild.getMemberById(target.userId)?.effectiveName
+            ?: guild.jda.getUserById(target.userId)?.effectiveName
+            ?: "対象"
+        val recentViolations = watchCycleService.getRecentAiViolationsForTarget(target.id, limit = 24)
+        if (recentViolations.isEmpty()) {
+            event.replyModal(buildFeedbackModalManual(target.id, displayName)).queue()
+            return
+        }
+
+        val selectBuilder = StringSelectMenu.create("$SELECT_FEEDBACK_PREFIX${target.id}")
+            .setPlaceholder("フィードバック対象のAI違反ログ、または見逃し手動入力を選択")
+            .addOption("📝 新規・見逃し発言を手動入力（イベント未指定）", "manual", "AIが見逃した発言などをテキスト入力で登録します")
+        recentViolations.forEach { ev ->
+            val label = String.format(Locale.US, "#%d (+%.1f%%) %s", ev.id, ev.delta, ev.category ?: "違反").take(100)
+            val desc = (ev.sourceMessageExcerpt ?: ev.reason ?: "詳細なし")
+                .replace("\n", " ")
+                .trim()
+                .take(100)
+            if (desc.isNotEmpty()) {
+                selectBuilder.addOption(label, "event:${ev.id}", desc)
+            } else {
+                selectBuilder.addOption(label, "event:${ev.id}")
+            }
+        }
+
+        val container = Container.of(
+            TextDisplay.of(
+                "## 🧠 AIフィードバック登録（対象: <@${target.userId}>）\n" +
+                    "直近のAI違反ログから評価対象を選ぶか、**「新規・見逃し発言を手動入力」** を選んでください。"
+            ),
+            Separator.createInvisible(Separator.Spacing.SMALL),
+            ActionRow.of(selectBuilder.build()),
+        ).withAccentColor(Color(0x34, 0x98, 0xDB))
+
+        event.replyComponents(container).setAllowedMentions(emptyList()).useComponentsV2().setEphemeral(true).queue()
+    }
+
+    private fun handleFeedbackEventSelect(
+        event: StringSelectInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+    ) {
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+        val targetId = event.componentId.substringAfter(SELECT_FEEDBACK_PREFIX).toLongOrNull() ?: return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "対象の監視データが見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        if (WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("操作できません", "監視対象者本人は自分の判定に対してフィードバックを登録できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val displayName = guild.getMemberById(target.userId)?.effectiveName
+            ?: guild.jda.getUserById(target.userId)?.effectiveName
+            ?: "対象"
+        val selected = event.values.firstOrNull() ?: return
+        if (selected == "manual") {
+            event.replyModal(buildFeedbackModalManual(target.id, displayName)).queue()
+            return
+        }
+        if (selected.startsWith("event:")) {
+            val eventId = selected.substringAfter("event:").toLongOrNull() ?: return
+            val sourceEvent = watchCycleService.getEventById(eventId)
+            if (sourceEvent == null || sourceEvent.guildId != guild.id || sourceEvent.targetId != target.id) {
+                event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "イベント `#${eventId}` が見つかりません。", Color.RED))
+                    .useComponentsV2().setEphemeral(true).queue()
+                return
+            }
+            event.replyModal(buildFeedbackModalForEvent(target.id, displayName, sourceEvent)).queue()
+        }
+    }
+
+    private fun handleFeedbackModalSubmit(
+        event: ModalInteractionEvent,
+        guild: net.dv8tion.jda.api.entities.Guild,
+    ) {
+        if (!WatchPermissions.ensureFeatureEnabledOrReply(event, guild)) return
+        if (!WatchPermissions.ensureAdminOrReply(event, guild, event.member)) return
+
+        val parts = event.modalId.substringAfter(MODAL_FEEDBACK_PREFIX).split(":")
+        val targetId = parts.getOrNull(0)?.toLongOrNull() ?: return
+        val mode = parts.getOrNull(1) ?: return
+        val target = watchConfigService.getTargetById(targetId)
+        if (target == null || target.guildId != guild.id) {
+            event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "対象の監視データが見つかりません。", Color.RED))
+                .useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        if (WatchPermissions.isSelfProtectionBlocked(event.user.id, target.userId)) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("操作できません", "監視対象者本人は自分の判定に対してフィードバックを登録できません。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+
+        val sourceEvent = if (mode != "manual") {
+            val eventId = mode.toLongOrNull()
+            val found = eventId?.let { watchCycleService.getEventById(it) }
+            if (found == null || found.guildId != guild.id || found.targetId != target.id) {
+                event.replyComponents(simpleTitleAndDescriptionContainer("エラー", "対象の違反イベントが見つかりません。", Color.RED))
+                    .useComponentsV2().setEphemeral(true).queue()
+                return
+            }
+            found
+        } else {
+            null
+        }
+
+        val verdict = AiFeedbackVerdict.fromString(
+            event.getValue("feedback_verdict")?.asStringList?.firstOrNull()
+        )
+        val expectedDelta = parseFeedbackExpectedDelta(event.getValue("feedback_expected_delta")?.asString)
+        if (expectedDelta == null) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("入力エラー", "望ましかったスコア増分は `0` 〜 `25` の数値で入力してください。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        val manualText = event.getValue("feedback_message_text")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+        val messageContent = sourceEvent?.sourceMessageExcerpt ?: manualText
+        if (messageContent.isNullOrBlank()) {
+            event.replyComponents(
+                simpleTitleAndDescriptionContainer("入力エラー", "対象の発言テキストを入力してください。", Color.RED)
+            ).useComponentsV2().setEphemeral(true).queue()
+            return
+        }
+        val note = event.getValue("feedback_note")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+        val applyDiff = sourceEvent != null &&
+            event.getValue("feedback_apply_diff")?.asStringList?.firstOrNull() == "YES"
+        val originalDelta = sourceEvent?.delta ?: 0.0
+
+        val fb = watchAiService.addFeedback(
+            guildId = guild.id,
+            targetId = target.id,
+            scoreEventId = sourceEvent?.id,
+            messageContent = messageContent,
+            contextExcerpt = null,
+            originalDelta = originalDelta,
+            expectedDelta = expectedDelta,
+            verdict = verdict,
+            note = note,
+            reviewerUserId = event.user.id,
+        )
+
+        event.deferReply(true).queue { hook ->
+            OhagiBot.scope.launch {
+                var diffNote = ""
+                if (applyDiff) {
+                    val diff = expectedDelta - originalDelta
+                    if (diff != 0.0) {
+                        WatchOrchestrator.applyScoreChange(
+                            guild = guild,
+                            target = target,
+                            eventType = WatchScoreEventType.MANUAL_ADJUST,
+                            delta = diff,
+                            category = "FEEDBACK_CORRECTION",
+                            reason = "フィードバック #${fb.id} に基づくスコア補正",
+                            actorUserId = event.user.id,
+                        )
+                        val sign = if (diff >= 0) "+" else ""
+                        diffNote = String.format(Locale.US, "\n- 現在違反度にも `%s%.1f%%` 補正反映しました。", sign, diff)
+                    }
+                }
+                var reevalNote = ""
+                if (verdict == AiFeedbackVerdict.MISSED && sourceEvent == null) {
+                    val reeval = WatchOrchestrator.reevaluateMissedFeedback(
+                        guild = guild,
+                        target = target,
+                        feedback = fb,
+                        rawInputText = messageContent,
+                    )
+                    reevalNote = "\n- 🔄 **見逃し再審査**: ${reeval.summaryJa}"
+                }
+                val eventNote = sourceEvent?.let { "\n- **対象イベント**: `#${it.id}`" }.orEmpty()
+                hook.editOriginalComponents(
+                    simpleTitleAndDescriptionContainer(
+                        "🧠 AIフィードバックを登録しました",
+                        "フィードバック **`#${fb.id}`** を保存しました。以降のAI推論時に Few-shot 事例として自動参照されます。" +
+                            eventNote +
+                            "\n- **評価**: ${verdict.displayName}（元 `$originalDelta` → 望ましい値 `$expectedDelta`）" +
+                            diffNote +
+                            reevalNote,
+                        Color(0x2E, 0xCC, 0x71),
+                    )
+                ).useComponentsV2().queue()
+            }
+        }
     }
 
     private fun handleBoardRefresh(

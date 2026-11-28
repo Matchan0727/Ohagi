@@ -252,6 +252,7 @@ object StatusBoardService {
             Button.primary("watch_graph:${target.id}:${GraphRange.WEEK_1.key}", "📊 グラフを見る"),
             Button.secondary("watch_logs:${target.id}:0", "📋 違反ログ"),
             reportBtn,
+            Button.secondary("watch_feedback:${target.id}", "🧠 AIフィードバック"),
             refreshBtn,
         )
         val ticketRow = ActionRow.of(

@@ -648,5 +648,45 @@ class WatchSystemTest {
         val modal = jp.simplespace.discord.listeners.WatchInteractionListener.buildIncidentReportModal(9L, "T氏")
         assertEquals("watch_report_modal:9", modal.id)
         assertEquals(4, modal.components.size)
+
+        // AIフィードバックモーダル・入力パースの検証
+        assertEquals(0.0, jp.simplespace.discord.listeners.WatchInteractionListener.parseFeedbackExpectedDelta("0"))
+        assertEquals(12.5, jp.simplespace.discord.listeners.WatchInteractionListener.parseFeedbackExpectedDelta("＋１２．５％"))
+        assertEquals(null, jp.simplespace.discord.listeners.WatchInteractionListener.parseFeedbackExpectedDelta("30"))
+        assertEquals(null, jp.simplespace.discord.listeners.WatchInteractionListener.parseFeedbackExpectedDelta("-1"))
+
+        val manualFbModal = jp.simplespace.discord.listeners.WatchInteractionListener.buildFeedbackModalManual(9L, "T氏")
+        assertEquals("watch_feedback_modal:9:manual", manualFbModal.id)
+        assertEquals(4, manualFbModal.components.size)
+
+        val sampleEvent = WatchScoreEvent(
+            id = 42L,
+            cycleId = 1L,
+            targetId = 9L,
+            guildId = "g1",
+            userId = "u1",
+            eventType = WatchScoreEventType.AI_VIOLATION,
+            delta = 15.0,
+            scoreAfter = 45.0,
+            category = "INSULT",
+            reason = "テスト",
+            sourceChannelId = "ch1",
+            sourceMessageId = "m1",
+            sourceMessageExcerpt = "テスト発言",
+            aiRawJson = null,
+            actorUserId = null,
+            createdAt = 0L,
+        )
+        val eventFbModal = jp.simplespace.discord.listeners.WatchInteractionListener.buildFeedbackModalForEvent(9L, "T氏", sampleEvent)
+        assertEquals("watch_feedback_modal:9:42", eventFbModal.id)
+        assertEquals(4, eventFbModal.components.size)
+
+        // 見逃し再審査用の Discord メッセージリンク解析
+        val parsedLink = WatchOrchestrator.parseDiscordMessageLink("https://discord.com/channels/111/222/333")
+        assertNotNull(parsedLink)
+        assertEquals("111", parsedLink.guildId)
+        assertEquals("222", parsedLink.channelId)
+        assertEquals("333", parsedLink.messageId)
+        assertEquals(null, WatchOrchestrator.parseDiscordMessageLink("これはただのテキスト発言"))
     }
 }
